@@ -6,6 +6,8 @@ import path from 'path';
 
 const LOG_DIR = './logs';
 
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+
 // Ensure log directory exists, safely
 try {
   await fs.mkdir(LOG_DIR, { recursive: true });
@@ -23,8 +25,6 @@ const log = async ({ sessionId, jobId, type, message, meta = {} }) => {
     ...meta,
   };
   const stringified = JSON.stringify(entry);
-
-  console.log(stringified); // Dev log
 
   // Write to Redis
   if (sessionId) {
@@ -66,6 +66,7 @@ const newWorker = new Worker(
       'X-User-Id': auth.userId,
     };
 
+    // Job Start Event
     await log({
       sessionId,
       jobId,
@@ -77,8 +78,31 @@ const newWorker = new Worker(
     for (let i = 0; i < records.length; i++) {
       const record = records[i];
       try {
+        // Log the request payload before sending the API request
+        await log({
+          sessionId,
+          jobId,
+          type: 'API_REQUEST',
+          message: `Sending API request for record ${i + 1}`,
+          meta: { record },
+        });
+
         const response = await axios.post(apiUrl, record, { headers });
 
+        // Log the response data after the API request completes
+        await log({
+          sessionId,
+          jobId,
+          type: 'API_RESPONSE',
+          message: `Received response for record ${i + 1}`,
+          meta: {
+            status: response.status,
+            data: response.data,
+            headers: response.headers,
+          },
+        });
+
+        // Log success for each record
         await log({
           sessionId,
           jobId,
@@ -87,20 +111,30 @@ const newWorker = new Worker(
           meta: { status: response.status },
         });
 
+        // Update progress in the BullMQ Dashboard
         await job.updateProgress(((i + 1) / records.length) * 100);
       } catch (err) {
         const errorMessage = err.response?.headers?.['response-description'] || err.message;
 
+        // Log the error details
         await log({
           sessionId,
           jobId,
-          type: 'ERROR',
+          type: 'API_ERROR',
           message: `Error on record ${i + 1}`,
-          meta: { error: errorMessage, payload: record },
+          meta: {
+            error: errorMessage,
+            payload: record,
+            stack: err.stack,
+            status: err.response?.status,
+            responseData: err.response?.data,
+            responseHeaders: err.response?.headers,
+          },
         });
       }
     }
 
+    // Job Completion Event
     await log({
       sessionId,
       jobId,
@@ -108,5 +142,24 @@ const newWorker = new Worker(
       message: `Job completed for session: ${sessionId}`,
     });
   },
-  { concurrency: 4 }
+  {
+    concurrency: 4,
+  }
 );
+
+// Handle job events (useful for the BullMQ Dashboard)
+newWorker.on('completed', (job) => {
+  console.log(`Job ${job.id} completed!`);
+});
+
+newWorker.on('failed', (job, err) => {
+  console.error(`Job ${job.id} failed with error: ${err.message}`);
+});
+
+newWorker.on('progress', (job, progress) => {
+  console.log(`Job ${job.id} is ${progress}% complete`);
+});
+
+newWorker.on('stalled', (job) => {
+  console.log(`Job ${job.id} is stalled`);
+});
