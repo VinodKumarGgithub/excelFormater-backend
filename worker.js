@@ -5,7 +5,13 @@ import redis from './redis.js';
 import path from 'path';
 
 const LOG_DIR = './logs';
-await fs.mkdir(LOG_DIR, { recursive: true });
+
+// Ensure log directory exists, safely
+try {
+  await fs.mkdir(LOG_DIR, { recursive: true });
+} catch (err) {
+  console.error(`Failed to create log directory "${LOG_DIR}": ${err.message}`);
+}
 
 const log = async ({ sessionId, jobId, type, message, meta = {} }) => {
   const timestamp = new Date().toISOString();
@@ -25,16 +31,19 @@ const log = async ({ sessionId, jobId, type, message, meta = {} }) => {
     try {
       await redis.rpush(`logs:${sessionId}`, stringified);
     } catch (err) {
-      console.error(`Failed to write to Redis: ${err.message}`);
+      console.error(`Failed to write to Redis for sessionId "${sessionId}": ${err.message}`);
     }
   }
 
-  // Write to file
+  // Sanitize sessionId for filename use
+  const safeSessionId = sessionId?.replace(/[<>:"/\\|?*\s]/g, '_') || 'general';
+  const logPath = path.join(LOG_DIR, `${safeSessionId}.log`);
+
+  // Write to log file
   try {
-    const logPath = path.join(LOG_DIR, `${sessionId || 'general'}.log`);
     await fs.appendFile(logPath, stringified + '\n');
   } catch (err) {
-    console.error(`Failed to write log file: ${err.message}`);
+    console.error(`Failed to write log file for sessionId "${safeSessionId}": ${err.message}`);
   }
 };
 
