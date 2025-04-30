@@ -5,10 +5,8 @@ import redis from './redis.js';
 import path from 'path';
 
 const LOG_DIR = './logs';
-
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 
-// Ensure log directory exists, safely
 try {
   await fs.mkdir(LOG_DIR, { recursive: true });
 } catch (err) {
@@ -17,40 +15,30 @@ try {
 
 const log = async ({ sessionId, jobId, type, message, meta = {} }) => {
   const timestamp = new Date().toISOString();
-  const entry = {
-    time: timestamp,
-    jobId,
-    type,
-    message,
-    ...meta,
-  };
+  const entry = { time: timestamp, jobId, type, message, ...meta };
   const stringified = JSON.stringify(entry);
 
-  // Write to Redis
   if (sessionId) {
     try {
       await redis.rpush(`logs:${sessionId}`, stringified);
     } catch (err) {
-      console.error(`Failed to write to Redis for sessionId "${sessionId}": ${err.message}`);
+      console.error(`Failed to write to Redis: ${err.message}`);
     }
   }
 
-  // Sanitize sessionId for filename use
   const safeSessionId = sessionId?.replace(/[<>:"/\\|?*\s]/g, '_') || 'general';
   const logPath = path.join(LOG_DIR, `${safeSessionId}.log`);
-
-  // Write to log file
   try {
     await fs.appendFile(logPath, stringified + '\n');
   } catch (err) {
-    console.error(`Failed to write log file for sessionId "${safeSessionId}": ${err.message}`);
+    console.error(`Failed to write log file: ${err.message}`);
   }
 };
 
 const newWorker = new Worker(
   'batchQueue',
   async (job) => {
-    const { sessionId, records } = job.data;
+    const { sessionId, records, verbose = false } = job.data;
     const jobId = job.id;
 
     const configJson = await redis.get(sessionId);
@@ -66,7 +54,6 @@ const newWorker = new Worker(
       'X-User-Id': auth.userId,
     };
 
-    // Job Start Event
     await log({
       sessionId,
       jobId,
@@ -78,45 +65,49 @@ const newWorker = new Worker(
     for (let i = 0; i < records.length; i++) {
       const record = records[i];
       try {
-        // Log the request payload before sending the API request
-        await log({
-          sessionId,
-          jobId,
-          type: 'API_REQUEST',
-          message: `Sending API request for record ${i + 1}`,
-          meta: { record },
-        });
+        if (verbose) {
+          await log({
+            sessionId,
+            jobId,
+            type: 'API_REQUEST',
+            message: `Sending API request for record ${i + 1}`,
+            meta: { record },
+          });
+        }
 
         const response = await axios.post(apiUrl, record, { headers });
 
-        // Log the response data after the API request completes
-        await log({
-          sessionId,
-          jobId,
-          type: 'API_RESPONSE',
-          message: `Received response for record ${i + 1}`,
-          meta: {
-            status: response.status,
-            data: response.data,
-            headers: response.headers,
-          },
-        });
+        if (verbose) {
+          await log({
+            sessionId,
+            jobId,
+            type: 'API_RESPONSE',
+            message: `Received response for record ${i + 1}`,
+            meta: {
+              status: response.status,
+              data: response.data,
+              headers: response.headers,
+            },
+          });
+        }
 
-        // Log success for each record
-        await log({
-          sessionId,
-          jobId,
-          type: 'SUCCESS',
-          message: `Sent record ${i + 1}/${records.length}`,
-          meta: { status: response.status },
-        });
+        // Log every 10th record if not verbose
+        if (verbose || i % 10 === 0 || i === records.length - 1) {
+          await log({
+            sessionId,
+            jobId,
+            type: 'SUCCESS',
+            message: `Processed record ${i + 1}/${records.length}`,
+            meta: { status: response.status },
+          });
+        }
 
-        // Update progress in the BullMQ Dashboard
-        await job.updateProgress(((i + 1) / records.length) * 100);
+        if (verbose || i % 5 === 0 || i === records.length - 1) {
+          await job.updateProgress(((i + 1) / records.length) * 100);
+        }
+
       } catch (err) {
         const errorMessage = err.response?.headers?.['response-description'] || err.message;
-
-        // Log the error details
         await log({
           sessionId,
           jobId,
@@ -134,7 +125,6 @@ const newWorker = new Worker(
       }
     }
 
-    // Job Completion Event
     await log({
       sessionId,
       jobId,
@@ -147,7 +137,6 @@ const newWorker = new Worker(
   }
 );
 
-// Handle job events (useful for the BullMQ Dashboard)
 newWorker.on('completed', (job) => {
   console.log(`Job ${job.id} completed!`);
 });
