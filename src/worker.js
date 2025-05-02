@@ -1,7 +1,7 @@
 import { Worker } from 'bullmq';
 import axios from 'axios';
 import fs from 'fs/promises';
-import redis from './redis.js';
+import redis from './redis/client.js';
 import path from 'path';
 
 const LOG_DIR = './logs';
@@ -151,4 +151,4 @@ newWorker.on('progress', (job, progress) => {
 
 newWorker.on('stalled', (job) => {
   console.log(`Job ${job.id} is stalled`);
-});
+}); 
