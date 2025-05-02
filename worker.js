@@ -202,7 +202,7 @@ const newWorker = new Worker(
     };
   },
   {
-    concurrency: 4,
+    concurrency: 20,
     limiter: {
       max: 1000,
       duration: 5000
