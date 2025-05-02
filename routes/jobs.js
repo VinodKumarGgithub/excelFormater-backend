@@ -24,6 +24,11 @@ router.get('/jobs', async (req, res) => {
         id: job.id,
         name: job.name,
         status,
+        meta: {
+          TransactionId: job.data?.records[0]?.requestId,
+          MemberId: job.data?.records[0]?.memberId,
+          PayerId: job.data?.records[0]?.payerId,
+        },
         progress: job.progress,
         timestamp: job.timestamp,
         finishedOn: job.finishedOn,
@@ -105,6 +110,14 @@ router.post('/queue/resume', async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+// POST /api/queue-batch
+router.post('/queue-batch', async (req, res) => {
+  const { sessionId, records } = req.body;
+  if (!sessionId || !records) return res.status(400).json({ error: 'Missing data' });
+  await batchQueue.add('processBatch', { sessionId, records });
+  res.json({ status: 'queued' });
 });
 
 export default router; 
