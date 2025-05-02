@@ -27,9 +27,9 @@ createBullBoard({
 app.use(cors());
 app.use(express.json());
 app.use('/admin/queues', serverAdapter.getRouter());
+app.use('/api', sessionsRouter);
 app.use('/api', jobsRouter);
 app.use('/api', logsRouter);
-app.use('/api', sessionsRouter);
 app.use('/api', metricsRouter);
 
 app.listen(port, () => {

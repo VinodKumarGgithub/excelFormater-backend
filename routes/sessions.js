@@ -1,7 +1,52 @@
 import express from 'express';
 import redis from '../redis.js';
+import jwt from 'jsonwebtoken';
 
 const router = express.Router();
+
+const JWT_SECRET = process.env.JWT_SECRET || 'sd@!v@#$%^&*()_+';
+const DEMO_USER = { username: 'admin', password: 'password123' };
+
+// JWT authentication middleware
+export function authenticateJWT(req, res, next) {
+  const authHeader = req.headers.authorization;
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    const token = authHeader.split(' ')[1];
+    jwt.verify(token, JWT_SECRET, (err, user) => {
+      if (err) return res.status(401).json({ error: 'Invalid token' });
+      req.user = user;
+      next();
+    });
+  } else {
+    res.status(401).json({ error: 'No token provided' });
+  }
+}
+
+// POST /api/login
+router.post('/login', (req, res) => {
+  const { username, password } = req.body;
+  if (username === DEMO_USER.username && password === DEMO_USER.password) {
+    const token = jwt.sign({ username }, JWT_SECRET, { expiresIn: '7d' });
+    return res.json({
+      token,
+      user: { username },
+      message: 'Login successful'
+    });
+  }
+  res.status(401).json({ error: 'Invalid credentials' });
+});
+
+// POST /api/init-session
+router.post('/init-session', async (req, res) => {
+  const { apiUrl, auth } = req.body;
+  if (!apiUrl || !auth) return res.status(400).json({ error: 'Missing data' });
+  const sessionId = 'session:' + Date.now().toString(36) + Math.random().toString(36).substr(2, 6);
+  await redis.set(sessionId, JSON.stringify({ apiUrl, auth }), 'EX', 86400); // add 1 week
+  res.json({ sessionId });
+});
+
+// Protect all routes below this line
+router.use(authenticateJWT);
 
 // GET /api/sessions
 router.get('/sessions', async (req, res) => {
@@ -23,15 +68,6 @@ router.get('/sessions', async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
-});
-
-// POST /api/init-session
-router.post('/init-session', async (req, res) => {
-  const { apiUrl, auth } = req.body;
-  if (!apiUrl || !auth) return res.status(400).json({ error: 'Missing data' });
-  const sessionId = 'session:' + Date.now().toString(36) + Math.random().toString(36).substr(2, 6);
-  await redis.set(sessionId, JSON.stringify({ apiUrl, auth }), 'EX', 86400); // add 1 week
-  res.json({ sessionId });
 });
 
 export default router; 
