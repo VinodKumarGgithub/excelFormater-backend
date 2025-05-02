@@ -1,9 +1,12 @@
 import express from 'express';
 import { Queue } from 'bullmq';
 import redis from '../redis.js';
+import { authenticateJWT } from './sessions.js';
 
 const batchQueue = new Queue('batchQueue', { connection: redis });
 const router = express.Router();
+
+router.use(authenticateJWT);
 
 // GET /api/jobs?status=waiting,active,completed,failed,delayed&page=1&pageSize=10
 router.get('/jobs', async (req, res) => {

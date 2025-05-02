@@ -1,7 +1,10 @@
 import express from 'express';
 import redis from '../redis.js';
+import { authenticateJWT } from './sessions.js';
 
 const router = express.Router();
+
+router.use(authenticateJWT);
 
 // GET /api/metrics/:jobId
 router.get('/metrics/:jobId', async (req, res) => {

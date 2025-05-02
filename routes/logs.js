@@ -1,7 +1,10 @@
 import express from 'express';
 import redis from '../redis.js';
+import { authenticateJWT } from './sessions.js';
 
 const router = express.Router();
+
+router.use(authenticateJWT);
 
 // GET /api/logs/:sessionId
 router.get('/logs/:sessionId', async (req, res) => {
