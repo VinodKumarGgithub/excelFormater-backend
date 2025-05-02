@@ -102,7 +102,8 @@ async function processRecord(record, apiUrl, headers, sessionId, jobId, recordIn
         meta: { 
           status: response.status,
           attempt: attempt + 1,
-          recordId: record.id
+          recordId: record.id,
+          batchId: record.memberId
         }
       });
 
