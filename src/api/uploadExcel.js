@@ -6,6 +6,7 @@ import { v4 as uuidv4 } from 'uuid';
 import XLSX from 'xlsx';
 import streamJsonPkg from 'stream-json';
 import streamArrayPkg from 'stream-json/streamers/StreamArray.js';
+import { io } from '../server.js'; // Import the io instance
 const { parser } = streamJsonPkg;
 const { streamArray } = streamArrayPkg;
 
@@ -17,6 +18,8 @@ if (!fs.existsSync(TEMP_DIR)) fs.mkdirSync(TEMP_DIR);
 const upload = multer({ dest: TEMP_DIR, limits: { fileSize: 200 * 1024 * 1024 } }); // 200MB limit
 
 router.post('/', upload.single('file'), (req, res) => {
+  const { socketId } = req.body; // Client should send their socketId in the form data
+
   if (!req.file) {
     return res.status(400).json({ error: 'No file uploaded' });
   }
@@ -32,8 +35,9 @@ router.post('/', upload.single('file'), (req, res) => {
     });
 
     const allJsonData = {};
+    const totalSheets = workbook.SheetNames.length;
 
-    workbook.SheetNames.forEach(sheetName => {
+    workbook.SheetNames.forEach((sheetName, sheetIdx) => {
       const sheet = workbook.Sheets[sheetName];
       const jsonData = XLSX.utils.sheet_to_json(sheet, {
         raw: true,
@@ -60,8 +64,10 @@ router.post('/', upload.single('file'), (req, res) => {
         }
       }
 
-      // Format only the detected date columns
-      const formattedData = jsonData.map(row => {
+      // Format only the detected date columns and emit row-level progress
+      const formattedData = [];
+      const totalRows = jsonData.length;
+      jsonData.forEach((row, rowIdx) => {
         const newRow = {};
         for (const key in row) {
           const value = row[key];
@@ -75,7 +81,18 @@ router.post('/', upload.single('file'), (req, res) => {
             newRow[key] = value;
           }
         }
-        return newRow;
+        formattedData.push(newRow);
+
+        // Emit progress every 10 rows or on last row
+        if (socketId && (rowIdx % 10 === 0 || rowIdx === totalRows - 1)) {
+          io.to(socketId).emit('excel-progress', {
+            sheet: sheetName,
+            row: rowIdx + 1,
+            totalRows,
+            percent: totalRows > 0 ? Math.round(((rowIdx + 1) / totalRows) * 100) : 100,
+            message: `Processing row ${rowIdx + 1} of ${totalRows} in sheet "${sheetName}"`,
+          });
+        }
       });
 
       allJsonData[sheetName] = formattedData;
@@ -89,9 +106,24 @@ router.post('/', upload.single('file'), (req, res) => {
     // Remove the uploaded file
     fs.unlinkSync(req.file.path);
 
+    if (socketId) {
+      io.to(socketId).emit('excel-progress', {
+        percent: 100,
+        message: 'Excel parsing complete!',
+        file: resultFileName,
+      });
+    }
+
     res.json({ file: resultFileName, message: 'Excel parsed and saved.' });
   } catch (err) {
     fs.unlinkSync(req.file.path);
+    if (socketId) {
+      io.to(socketId).emit('excel-progress', {
+        percent: 0,
+        message: 'Failed to process Excel file',
+        error: err.message,
+      });
+    }
     res.status(500).json({ error: 'Failed to process Excel file', details: err.message });
   }
 });
