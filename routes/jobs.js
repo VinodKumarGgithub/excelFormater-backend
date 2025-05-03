@@ -20,9 +20,11 @@ router.get('/jobs', async (req, res) => {
 
     let jobs = [];
     let total = 0;
+    const statusTotals = {};
     for (const status of statuses) {
       const statusJobs = await batchQueue.getJobs([status], start, end);
       const count = await batchQueue.getJobCountByTypes(status);
+      statusTotals[status] = count;
       jobs = jobs.concat(statusJobs.map(job => ({
         id: job.id,
         name: job.name,
@@ -50,7 +52,8 @@ router.get('/jobs', async (req, res) => {
         pageSize,
         total,
         totalPages: Math.ceil(total / pageSize)
-      }
+      },
+      statusTotals
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
