@@ -18,10 +18,10 @@ process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 // Dynamic concurrency management
 const MIN_CONCURRENCY = 20;
 const MAX_CONCURRENCY = 50;
-let currentConcurrency = 5;
+let currentConcurrency = 20;
 let workerInstance = null;
 let lastConcurrencyChange = 0;
-const COOLDOWN_MS = 60000; // 1 minute cooldown between changes
+const COOLDOWN_MS = 30000; // 30 seconds cooldown between changes
 let consecutiveDecreaseTriggers = 0;
 const MAX_DECREASE_STEP = 3;
 
