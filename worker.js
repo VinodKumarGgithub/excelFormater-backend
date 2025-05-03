@@ -31,6 +31,8 @@ let memHistory = [];
 let errorRateHistory = [];
 const HISTORY_LENGTH = 5;
 
+const WORKER_ID = process.env.WORKER_ID || Math.random().toString(36).slice(2, 10);
+
 function movingAverage(arr) {
   if (arr.length === 0) return 0;
   return arr.reduce((a, b) => a + b, 0) / arr.length;
@@ -153,6 +155,7 @@ function createWorker(concurrency) {
           });
           // Store global metrics in Redis
           const globalMetrics = {
+            workerId: WORKER_ID,
             currentConcurrency,
             avgTimePerRecordMs: Math.round(avgTimePerRecord),
             estTimeLeftSec,
@@ -168,7 +171,7 @@ function createWorker(concurrency) {
             progressHistory: global.progressHistory,
             timestamp: Date.now()
           };
-          await redis.set('worker:globalMetrics', JSON.stringify(globalMetrics), 'EX', 60);
+          await redis.set(`worker:globalMetrics:${WORKER_ID}`, JSON.stringify(globalMetrics));
         }
       }
 
