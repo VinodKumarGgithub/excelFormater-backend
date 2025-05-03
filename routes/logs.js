@@ -7,6 +7,7 @@ const router = express.Router();
 router.use(authenticateJWT);
 
 // GET /api/logs/:sessionId
+// Note: For API interactions, logs of type 'API_CALL' will contain both request and response (or error) details in the meta field.
 router.get('/logs/:sessionId', async (req, res) => {
   try {
     const { sessionId } = req.params;
