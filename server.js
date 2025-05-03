@@ -34,8 +34,8 @@ app.use('/api', metricsRouter);
 
 app.listen(port, () => {
   console.log(`Server running at http://localhost:${port}`);
-  console.log(`Bull Board at http://localhost:${port}/admin/queues`);
-  console.log(`Logs API at http://localhost:${port}/api/logs/:sessionId`);
-  console.log(`Sessions API at http://localhost:${port}/api/sessions`);
-  console.log(`Metrics API at http://localhost:${port}/api/metrics/:jobId`);
+  // console.log(`Bull Board at http://localhost:${port}/admin/queues`);
+  // console.log(`Logs API at http://localhost:${port}/api/logs/:sessionId`);
+  // console.log(`Sessions API at http://localhost:${port}/api/sessions`);
+  // console.log(`Metrics API at http://localhost:${port}/api/metrics/:jobId`);
 });
