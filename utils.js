@@ -40,35 +40,29 @@ export async function processRecord(record, apiUrl, headers, sessionId, jobId, r
 
   while (attempt < maxRetries) {
     try {
-      // Log API request
-      await log({
-        sessionId,
-        jobId,
-        batchId,
-        requestId,
-        type: 'API_REQUEST',
-        message: `Sending API request for record ${recordIndex + 1}/${totalRecords}`,
-        meta: { apiUrl, attempt: attempt + 1 }
-      });
-
+      const apiCallMeta = {
+        apiUrl,
+        attempt: attempt + 1,
+        requestPayload: record,
+        headers,
+      };
       // Use rate limiter for API calls
       const response = await limiter.schedule(() => 
         api.post(apiUrl, record, { headers })
       );
+      apiCallMeta.status = response.status;
+      apiCallMeta.responseData = response.data;
+      apiCallMeta.responseHeaders = response.headers;
 
-      // Log API response
+      // Log API call (request + response)
       await log({
         sessionId,
         jobId,
         batchId,
         requestId,
-        type: 'API_RESPONSE',
-        message: `Received API response for record ${recordIndex + 1}/${totalRecords}`,
-        meta: {
-          status: response.status,
-          responseData: response.data,
-          headers: response.headers
-        }
+        type: 'API_CALL',
+        message: `API call for record ${recordIndex + 1}/${totalRecords}`,
+        meta: apiCallMeta
       });
 
       // Log success
@@ -86,7 +80,26 @@ export async function processRecord(record, apiUrl, headers, sessionId, jobId, r
       attempt++;
       const isLastAttempt = attempt === maxRetries;
       const errorMessage = err.response?.headers?.['response-description'] || err.message;
-
+      const apiCallMeta = {
+        apiUrl,
+        attempt,
+        requestPayload: record,
+        headers,
+        error: errorMessage,
+        status: err.response?.status,
+        responseHeaders: err.response?.headers,
+        responseData: err.response?.data
+      };
+      // Log API call (request + error)
+      await log({
+        sessionId,
+        jobId,
+        batchId,
+        requestId,
+        type: 'API_CALL',
+        message: `API call for record ${recordIndex + 1}/${totalRecords}`,
+        meta: apiCallMeta
+      });
       await log({
         sessionId,
         jobId,
@@ -100,7 +113,6 @@ export async function processRecord(record, apiUrl, headers, sessionId, jobId, r
           willRetry: !isLastAttempt
         }
       });
-
       if (isLastAttempt) throw err;
       await new Promise(resolve => setTimeout(resolve, Math.pow(2, attempt) * 1000));
     }

@@ -71,6 +71,17 @@ function createWorker(concurrency) {
 
       // Process records with progress tracking
       let startTime = Date.now();
+      const startedAt = new Date(startTime).toISOString();
+      await log({
+        sessionId,
+        jobId,
+        type: 'JOB_STARTED',
+        message: 'Job started',
+        meta: {
+          totalRecords: records.length,
+          startedAt
+        }
+      });
       let processedCount = 0;
       let totalProcessingTime = 0;
       for (let i = 0; i < records.length; i++) {
@@ -189,6 +200,23 @@ function createWorker(concurrency) {
         type: 'COMPLETE',
         message: `Batch processing complete`,
         meta: { successCount, failureCount, totalRecords: records.length }
+      });
+
+      // Log job completed with timing and stats
+      const completedAt = new Date().toISOString();
+      await log({
+        sessionId,
+        jobId,
+        type: 'JOB_COMPLETED',
+        message: 'Job completed',
+        meta: {
+          totalRecords: records.length,
+          successCount,
+          failureCount,
+          startedAt,
+          completedAt,
+          durationSec: Math.round((Date.parse(completedAt) - Date.parse(startedAt)) / 1000)
+        }
       });
 
       return {
