@@ -1,248 +1,297 @@
 import { Worker, Job } from 'bullmq';
-import axios from 'axios';
 import fs from 'fs/promises';
 import redis from './redis.js';
 import path from 'path';
-import Bottleneck from 'bottleneck';
-import pino from 'pino';
+import os from 'os';
+import { log } from './logger.js';
+import {
+  processRecord,
+  validateJobData,
+  createAuthHeaders,
+  getQueueBacklog,
+  getApiErrorRate,
+  getApiRateLimitStatus
+} from './utils.js';
 
-// Configure logger
-const logger = pino({
-  level: process.env.LOG_LEVEL || 'info',
-  transport: {
-    target: 'pino-pretty',
-    options: {
-      colorize: true,
-      translateTime: 'SYS:standard'
-    }
-  }
-});
-
-const LOG_DIR = './logs';
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 
-// Configure rate limiter
-const limiter = new Bottleneck({
-  maxConcurrent: 5,
-  minTime: 100 // Minimum time between requests
-});
+// Dynamic concurrency management
+const MIN_CONCURRENCY = 20;
+const MAX_CONCURRENCY = 50;
+let currentConcurrency = 5;
+let workerInstance = null;
+let lastConcurrencyChange = 0;
+const COOLDOWN_MS = 60000; // 1 minute cooldown between changes
+let consecutiveDecreaseTriggers = 0;
+const MAX_DECREASE_STEP = 3;
 
-// Configure axios instance with defaults
-const api = axios.create({
-  timeout: 10000,
-  validateStatus: status => status < 500 // Retry only on 500+ errors
-});
+// Helper for moving average
+let cpuHistory = [];
+let memHistory = [];
+let errorRateHistory = [];
+const HISTORY_LENGTH = 5;
 
-// Create log directory
-try {
-  await fs.mkdir(LOG_DIR, { recursive: true });
-} catch (err) {
-  logger.error({ err }, `Failed to create log directory "${LOG_DIR}"`);
+function movingAverage(arr) {
+  if (arr.length === 0) return 0;
+  return arr.reduce((a, b) => a + b, 0) / arr.length;
 }
 
-// Map log types to pino log levels
-const LOG_LEVEL_MAP = {
-  'ERROR': 'error',
-  'WARN': 'warn',
-  'INFO': 'info',
-  'START': 'info',
-  'SUCCESS': 'info',
-  'COMPLETE': 'info',
-  'API_REQUEST': 'debug',
-  'API_RESPONSE': 'debug',
-  'API_ERROR': 'error'
-};
-
-// Enhanced logging function with structured logging
-const log = async ({ sessionId, jobId, type, message, meta = {} }) => {
-  const timestamp = new Date().toISOString();
-  const entry = { time: timestamp, jobId, type, message, ...meta };
-  
-  // Log to console with pino using the correct log level
-  const logLevel = LOG_LEVEL_MAP[type] || 'info';
-  logger[logLevel]({ sessionId, ...entry });
-
-  // Store in Redis
-  if (sessionId) {
-    try {
-      await redis.rpush(`logs:${sessionId}`, JSON.stringify(entry));
-      await redis.expire(`logs:${sessionId}`, 86400); // Expire logs after 24 hours
-    } catch (err) {
-      logger.error({ err }, 'Failed to write to Redis');
-    }
+function createWorker(concurrency) {
+  if (workerInstance) {
+    workerInstance.close();
   }
+  workerInstance = new Worker(
+    'batchQueue',
+    async (job) => {
+      const { sessionId, records, verbose = false } = job.data;
+      const jobId = job.id;
+      let successCount = 0;
+      let failureCount = 0;
 
-  // Write to file
-  const safeSessionId = sessionId?.replace(/[<>:"/\\|?*\s]/g, '_') || 'general';
-  const logPath = path.join(LOG_DIR, `${safeSessionId}.log`);
-  try {
-    await fs.appendFile(logPath, JSON.stringify(entry) + '\n');
-  } catch (err) {
-    logger.error({ err }, 'Failed to write log file');
-  }
-};
+      // Validate job data
+      validateJobData(records);
 
-// Process single record with retries
-async function processRecord(record, apiUrl, headers, sessionId, jobId, recordIndex, totalRecords) {
-  const maxRetries = 3;
-  let attempt = 0;
-
-  while (attempt < maxRetries) {
-    try {
-      // Use rate limiter for API calls
-      const response = await limiter.schedule(() => 
-        api.post(apiUrl, record, { headers })
-      );
-
-      await log({
-        sessionId,
-        jobId,
-        type: 'SUCCESS',
-        message: `Processed record ${recordIndex + 1}/${totalRecords}`,
-        meta: { 
-          status: response.status,
-          attempt: attempt + 1,
-          recordId: record.id,
-          batchId: record.memberId
-        }
-      });
-
-      return response;
-    } catch (err) {
-      attempt++;
-      const isLastAttempt = attempt === maxRetries;
-      const errorMessage = err.response?.headers?.['response-description'] || err.message;
-      
-      await log({
-        sessionId,
-        jobId,
-        type: isLastAttempt ? 'ERROR' : 'WARN',
-        message: `Attempt ${attempt}/${maxRetries} failed for record ${recordIndex + 1}`,
-        meta: {
-          error: errorMessage,
-          payload: record,
-          status: err.response?.status,
-          willRetry: !isLastAttempt
-        }
-      });
-
-      if (isLastAttempt) throw err;
-      
-      // Exponential backoff
-      await new Promise(resolve => setTimeout(resolve, Math.pow(2, attempt) * 1000));
-    }
-  }
-}
-
-// Enhanced worker with better error handling and monitoring
-const newWorker = new Worker(
-  'batchQueue',
-  async (job) => {
-    const { sessionId, records, verbose = false } = job.data;
-    const jobId = job.id;
-    let successCount = 0;
-    let failureCount = 0;
-
-    // Validate job data
-    if (!Array.isArray(records) || records.length === 0) {
-      throw new Error('Invalid or empty records array');
-    }
-
-    const configJson = await redis.get(sessionId);
-    if (!configJson) {
-      throw new Error(`No config found for sessionId: ${sessionId}`);
-    }
-
-    const { apiUrl, auth } = JSON.parse(configJson);
-    const headers = {
-      Authorization: `Basic ${Buffer.from(`${auth.userId}:${auth.apiKey}`).toString('base64')}`,
-      'X-User-Id': auth.userId,
-    };
-
-    await log({
-      sessionId,
-      jobId,
-      type: 'START',
-      message: `Processing batch of ${records.length} records`,
-      meta: { totalRecords: records.length }
-    });
-
-    // Process records with progress tracking
-    for (let i = 0; i < records.length; i++) {
-      try {
-        await processRecord(records[i], apiUrl, headers, sessionId, jobId, i, records.length);
-        successCount++;
-      } catch (err) {
-        failureCount++;
+      const configJson = await redis.get(sessionId);
+      if (!configJson) {
+        throw new Error(`No config found for sessionId: ${sessionId}`);
       }
 
-      // Update progress
-      if (i % 5 === 0 || i === records.length - 1) {
-        await job.updateProgress({
+      const { apiUrl, auth } = JSON.parse(configJson);
+      const headers = createAuthHeaders(auth);
+
+      await log({
+        sessionId,
+        jobId,
+        type: 'START',
+        message: `Processing batch of ${records.length} records`,
+        meta: { totalRecords: records.length }
+      });
+
+      // Process records with progress tracking
+      let startTime = Date.now();
+      let processedCount = 0;
+      let totalProcessingTime = 0;
+      for (let i = 0; i < records.length; i++) {
+        const recordStart = Date.now();
+        try {
+          await processRecord(records[i], apiUrl, headers, sessionId, jobId, i, records.length);
+          successCount++;
+        } catch (err) {
+          failureCount++;
+        }
+        const recordEnd = Date.now();
+        processedCount++;
+        totalProcessingTime += (recordEnd - recordStart);
+
+        // Calculate ETA
+        const avgTimePerRecord = processedCount > 0 ? totalProcessingTime / processedCount : 0;
+        const recordsLeft = records.length - (i + 1);
+        const estTimeLeftMs = avgTimePerRecord * recordsLeft / currentConcurrency;
+        const estTimeLeftSec = Math.round(estTimeLeftMs / 1000);
+
+        // Get global metrics for graphing
+        const backlog = await getQueueBacklog();
+        const avgCpu = movingAverage(cpuHistory);
+        const avgMem = movingAverage(memHistory);
+        const avgError = movingAverage(errorRateHistory);
+
+        // Maintain a short history for graphing
+        if (!global.progressHistory) global.progressHistory = [];
+        global.progressHistory.push({
+          timestamp: Date.now(),
           completed: i + 1,
           total: records.length,
+          avgTimePerRecordMs: Math.round(avgTimePerRecord),
+          estTimeLeftSec,
+          currentConcurrency,
+          backlog,
+          avgCpu,
+          avgMem,
+          avgError,
           successCount,
-          failureCount
+          failureCount,
+          consecutiveDecreaseTriggers
         });
+        if (global.progressHistory.length > 20) global.progressHistory.shift();
+
+        // Update progress
+        if (i % 5 === 0 || i === records.length - 1) {
+          await job.updateProgress({
+            completed: i + 1,
+            total: records.length,
+            successCount,
+            failureCount,
+            meta: {
+              avgTimePerRecordMs: Math.round(avgTimePerRecord),
+              estTimeLeftSec,
+              currentConcurrency,
+              backlog,
+              avgCpu,
+              avgMem,
+              avgError,
+              consecutiveDecreaseTriggers
+            }
+          });
+          // Log batch progress
+          await log({
+            sessionId,
+            jobId,
+            type: 'PROGRESS',
+            message: `Batch progress: ${i + 1}/${records.length}`,
+            meta: {
+              successCount,
+              failureCount,
+              avgTimePerRecordMs: Math.round(avgTimePerRecord),
+              estTimeLeftSec,
+              currentConcurrency,
+              backlog,
+              avgCpu,
+              avgMem,
+              avgError,
+              consecutiveDecreaseTriggers
+            }
+          });
+          // Store global metrics in Redis
+          const globalMetrics = {
+            currentConcurrency,
+            avgTimePerRecordMs: Math.round(avgTimePerRecord),
+            estTimeLeftSec,
+            successCount,
+            failureCount,
+            total: records.length,
+            completed: i + 1,
+            backlog,
+            avgCpu,
+            avgMem,
+            avgError,
+            consecutiveDecreaseTriggers,
+            progressHistory: global.progressHistory,
+            timestamp: Date.now()
+          };
+          await redis.set('worker:globalMetrics', JSON.stringify(globalMetrics), 'EX', 60);
+        }
+      }
+
+      // Store job metrics
+      await redis.hset(`metrics:${jobId}`, {
+        successCount,
+        failureCount,
+        totalRecords: records.length,
+        completedAt: new Date().toISOString()
+      });
+
+      await log({
+        sessionId,
+        jobId,
+        type: 'COMPLETE',
+        message: `Batch processing complete`,
+        meta: { successCount, failureCount, totalRecords: records.length }
+      });
+
+      return {
+        successCount,
+        failureCount,
+        totalRecords: records.length
+      };
+    },
+    {
+      concurrency,
+      limiter: {
+        max: 1000,
+        duration: 5000
+      },
+      settings: {
+        retryProcessDelay: 5000,
+        backoffDelay: 5000
       }
     }
+  );
 
-    // Store job metrics
-    await redis.hset(`metrics:${jobId}`, {
+  // Enhanced event handlers
+  workerInstance.on('completed', async (job) => {
+    const { successCount, failureCount, totalRecords } = job.returnvalue;
+    log.info({
+      jobId: job.id,
       successCount,
       failureCount,
-      totalRecords: records.length,
-      completedAt: new Date().toISOString()
-    });
+      totalRecords
+    }, 'Job completed');
+  });
 
-    return {
-      successCount,
-      failureCount,
-      totalRecords: records.length
-    };
-  },
-  {
-    concurrency: 20,
-    limiter: {
-      max: 1000,
-      duration: 5000
-    },
-    settings: {
-      retryProcessDelay: 5000,
-      backoffDelay: 5000
+  workerInstance.on('failed', async (job, err) => {
+    log.error({
+      jobId: job.id,
+      error: err.message,
+      stack: err.stack
+    }, 'Job failed');
+  });
+
+  workerInstance.on('progress', (job, progress) => {
+    log.info({
+      jobId: job.id,
+      ...progress
+    }, 'Job progress update');
+  });
+
+  log.info({ concurrency }, 'Worker started with concurrency');
+}
+
+async function monitorAndAdjustConcurrency() {
+  setInterval(async () => {
+    const now = Date.now();
+    const cpu = os.loadavg()[0];
+    const mem = os.freemem() / os.totalmem();
+    const backlog = await getQueueBacklog();
+    const apiErrorRate = getApiErrorRate();
+
+    // Update histories
+    cpuHistory.push(cpu); if (cpuHistory.length > HISTORY_LENGTH) cpuHistory.shift();
+    memHistory.push(mem); if (memHistory.length > HISTORY_LENGTH) memHistory.shift();
+    errorRateHistory.push(apiErrorRate); if (errorRateHistory.length > HISTORY_LENGTH) errorRateHistory.shift();
+
+    const avgCpu = movingAverage(cpuHistory);
+    const avgMem = movingAverage(memHistory);
+    const avgError = movingAverage(errorRateHistory);
+
+    log.info({
+      avgCpu, avgMem, avgError, backlog, currentConcurrency, consecutiveDecreaseTriggers
+    }, 'Resource metrics for concurrency tuning');
+
+    // Cooldown logic
+    if (now - lastConcurrencyChange < COOLDOWN_MS) return;
+
+    // Enhanced logic
+    if (avgCpu < 1 && avgMem > 0.5 && backlog > 10 && avgError < 0.05) {
+      consecutiveDecreaseTriggers = 0;
+      if (currentConcurrency < MAX_CONCURRENCY) {
+        currentConcurrency++;
+        createWorker(currentConcurrency);
+        lastConcurrencyChange = now;
+        log.info({ currentConcurrency }, 'Increased concurrency');
+      }
+    } else if (avgCpu > 2 || avgMem < 0.2 || avgError > 0.1) {
+      consecutiveDecreaseTriggers++;
+      let decreaseStep = Math.min(consecutiveDecreaseTriggers, MAX_DECREASE_STEP);
+      let newConcurrency = Math.max(MIN_CONCURRENCY, currentConcurrency - decreaseStep);
+      if (newConcurrency < currentConcurrency) {
+        currentConcurrency = newConcurrency;
+        createWorker(currentConcurrency);
+        lastConcurrencyChange = now;
+        log.info({ currentConcurrency, decreaseStep }, 'Decreased concurrency with backoff');
+      }
+    } else {
+      consecutiveDecreaseTriggers = 0;
     }
-  }
-);
+  }, 30000);
+}
 
-// Enhanced event handlers
-newWorker.on('completed', async (job) => {
-  const { successCount, failureCount, totalRecords } = job.returnvalue;
-  logger.info({
-    jobId: job.id,
-    successCount,
-    failureCount,
-    totalRecords
-  }, 'Job completed');
-});
-
-newWorker.on('failed', async (job, err) => {
-  logger.error({
-    jobId: job.id,
-    error: err.message,
-    stack: err.stack
-  }, 'Job failed');
-});
-
-newWorker.on('progress', (job, progress) => {
-  logger.info({
-    jobId: job.id,
-    ...progress
-  }, 'Job progress update');
-});
+// On startup
+createWorker(currentConcurrency);
+monitorAndAdjustConcurrency();
 
 // Graceful shutdown
 process.on('SIGTERM', async () => {
-  logger.info('Shutting down worker...');
-  await newWorker.close();
+  log.info('Shutting down worker...');
+  if (workerInstance) await workerInstance.close();
   process.exit(0);
 });
