@@ -1,5 +1,8 @@
 import express from 'express';
-import redis from '../redis.js';
+
+// Import from new module structure
+import redis from '../lib/config/redisConfig.js';
+import { logger } from '../lib/services/loggerService.js';
 import { authenticateJWT } from './sessions.js';
 
 const router = express.Router();
@@ -12,6 +15,9 @@ router.get('/logs/:sessionId', async (req, res) => {
   try {
     const { sessionId } = req.params;
     const { start = 0, count = 50, type } = req.query;
+    
+    logger.debug({ sessionId, start, count, type }, 'Fetching logs');
+    
     const logs = await redis.lrange(`logs:${sessionId}`, start, start + count - 1);
     let formattedLogs = logs.map(log => {
       try {
@@ -26,25 +32,33 @@ router.get('/logs/:sessionId', async (req, res) => {
           meta: rest
         };
       } catch (e) {
+        logger.warn({ error: e.message, rawLog: log }, 'Invalid log entry');
         return { error: 'Invalid log entry', raw: log };
       }
     });
+    
     // Filter by type if provided
     if (type) {
       const typeArr = type.split(',').map(t => t.trim());
       formattedLogs = formattedLogs.filter(log => log.type && typeArr.includes(log.type));
     }
+    
     // Collect unique jobIds from logs
     const jobIds = Array.from(new Set(formattedLogs.map(log => log.jobId).filter(Boolean)));
+    
+    const totalLogs = await redis.llen(`logs:${sessionId}`);
+    logger.debug({ sessionId, totalLogs, fetchedLogs: formattedLogs.length }, 'Logs retrieved');
+    
     res.json({
       sessionId,
       jobId: jobIds.length === 1 ? jobIds[0] : jobIds, // single or array
-      total: await redis.llen(`logs:${sessionId}`),
+      total: totalLogs,
       start: parseInt(start),
       count: formattedLogs.length,
       logs: formattedLogs
     });
   } catch (err) {
+    logger.error({ error: err.message, sessionId: req.params.sessionId }, 'Failed to fetch logs');
     res.status(500).json({ error: err.message });
   }
 });

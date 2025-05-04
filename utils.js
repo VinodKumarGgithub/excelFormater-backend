@@ -1,149 +1,26 @@
-import { log } from './logger.js';
-import Bottleneck from 'bottleneck';
-import axios from 'axios';
-import { Queue } from 'bullmq';
-import redis from './redis.js';
+/**
+ * @deprecated Use the specific modules from lib/ directly
+ * This file is maintained for backward compatibility 
+ * and will be removed in future versions.
+ */
 
-// Configure rate limiter (should match worker.js settings)
-const limiter = new Bottleneck({
-  maxConcurrent: 5,
-  minTime: 100 // Minimum time between requests
-});
+// Re-export from helpers
+export { validateJobData } from './lib/helpers/validation.js';
+export { createAuthHeaders } from './lib/helpers/auth.js';
+export { 
+  getApiErrorRate,
+  trackApiErrorRate,
+  movingAverage,
+  detectTrend,
+  getHourFromTimestamp
+} from './lib/helpers/metrics.js';
 
-// Configure axios instance with defaults (should match worker.js settings)
-const api = axios.create({
-  timeout: 10000,
-  validateStatus: status => status < 500 // Retry only on 500+ errors
-});
+// Re-export from services
+export { processRecord } from './lib/services/processRecord.js';
+export { getQueueBacklog } from './lib/services/queueManager.js';
+export { getApiRateLimitStatus } from './lib/services/rateLimit.js';
+export { trackApiResponseMetrics, trackEndpointPerformance } from './lib/services/apiClient.js';
 
-// Validate job data utility
-export function validateJobData(records) {
-  if (!Array.isArray(records) || records.length === 0) {
-    throw new Error('Invalid or empty records array');
-  }
-}
-
-// Create headers for API auth
-export function createAuthHeaders(auth) {
-  return {
-    Authorization: `Basic ${Buffer.from(`${auth.userId}:${auth.apiKey}`).toString('base64')}`,
-    'X-User-Id': auth.userId,
-  };
-}
-
-// Process single record with clean logging
-export async function processRecord(record, apiUrl, headers, sessionId, jobId, recordIndex, totalRecords) {
-  const maxRetries = 3;
-  let attempt = 0;
-  const batchId = record.memberId;
-  const requestId = record.requestId;
-
-  while (attempt < maxRetries) {
-    try {
-      const apiCallMeta = {
-        apiUrl,
-        attempt: attempt + 1,
-        requestPayload: record,
-        headers,
-      };
-      // Use rate limiter for API calls
-      const response = await limiter.schedule(() => 
-        api.post(apiUrl, record, { headers })
-      );
-      apiCallMeta.status = response.status;
-      apiCallMeta.responseData = response.data;
-      apiCallMeta.responseHeaders = response.headers;
-
-      // Log API call (request + response)
-      await log({
-        sessionId,
-        jobId,
-        batchId,
-        requestId,
-        type: 'API_CALL',
-        message: `API call for record ${recordIndex + 1}/${totalRecords}`,
-        meta: apiCallMeta
-      });
-
-      // Log success
-      await log({
-        sessionId,
-        jobId,
-        batchId,
-        requestId,
-        type: 'SUCCESS',
-        message: `Processed record ${recordIndex + 1}/${totalRecords}`
-      });
-
-      return response;
-    } catch (err) {
-      attempt++;
-      const isLastAttempt = attempt === maxRetries;
-      const errorMessage = err.response?.headers?.['response-description'] || err.message;
-      const apiCallMeta = {
-        apiUrl,
-        attempt,
-        requestPayload: record,
-        headers,
-        error: errorMessage,
-        status: err.response?.status,
-        responseHeaders: err.response?.headers,
-        responseData: err.response?.data
-      };
-      // Log API call (request + error)
-      await log({
-        sessionId,
-        jobId,
-        batchId,
-        requestId,
-        type: 'API_CALL',
-        message: `API call for record ${recordIndex + 1}/${totalRecords}`,
-        meta: apiCallMeta
-      });
-      await log({
-        sessionId,
-        jobId,
-        batchId,
-        requestId,
-        type: isLastAttempt ? 'ERROR' : 'WARN',
-        message: `Attempt ${attempt}/${maxRetries} failed for record ${recordIndex + 1}`,
-        meta: {
-          error: errorMessage,
-          status: err.response?.status,
-          willRetry: !isLastAttempt
-        }
-      });
-      if (isLastAttempt) throw err;
-      await new Promise(resolve => setTimeout(resolve, Math.pow(2, attempt) * 1000));
-    }
-  }
-}
-
-// Utility to get queue backlog (waiting jobs)
-const batchQueue = new Queue('batchQueue', { connection: redis });
-export async function getQueueBacklog() {
-  return batchQueue.getJobCountByTypes('waiting');
-}
-
-// In-memory API error tracking (for demo; use Redis for distributed)
-let apiErrorTimestamps = [];
-const ERROR_WINDOW_MS = 5 * 60 * 1000; // 5 minutes
-
-export function trackApiErrorRate(isError) {
-  const now = Date.now();
-  // Remove old errors
-  apiErrorTimestamps = apiErrorTimestamps.filter(ts => now - ts < ERROR_WINDOW_MS);
-  if (isError) apiErrorTimestamps.push(now);
-}
-
-export function getApiErrorRate() {
-  const now = Date.now();
-  apiErrorTimestamps = apiErrorTimestamps.filter(ts => now - ts < ERROR_WINDOW_MS);
-  // For demo: error rate = errors per minute
-  return apiErrorTimestamps.length / (ERROR_WINDOW_MS / 60000);
-}
-
-// Stub for API rate limit status (extend as needed)
-export function getApiRateLimitStatus() {
-  return false; // Implement real check if API provides rate limit info
-} 
+// Log a deprecation warning
+import { logger } from './lib/services/loggerService.js';
+logger.warn('utils.js is deprecated. Please import from lib/ modules directly.'); 

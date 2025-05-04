@@ -1,19 +1,23 @@
 import express from 'express';
-import redis from '../redis.js';
 import jwt from 'jsonwebtoken';
 
-const router = express.Router();
+// Import from new module structure
+import redis from '../lib/config/redisConfig.js';
+import { logger } from '../lib/services/loggerService.js';
+import { ENV, AUTH, QUEUE } from '../lib/config/appConfig.js';
 
-const JWT_SECRET = process.env.JWT_SECRET || 'sd@!v@#$%^&*()_+';
-const DEMO_USER = { username: 'admin', password: 'password123' };
+const router = express.Router();
 
 // JWT authentication middleware
 export function authenticateJWT(req, res, next) {
   const authHeader = req.headers.authorization;
   if (authHeader && authHeader.startsWith('Bearer ')) {
     const token = authHeader.split(' ')[1];
-    jwt.verify(token, JWT_SECRET, (err, user) => {
-      if (err) return res.status(401).json({ error: 'Invalid token' });
+    jwt.verify(token, ENV.JWT_SECRET, (err, user) => {
+      if (err) {
+        logger.warn({ error: err.message, ip: req.ip }, 'JWT authentication failed');
+        return res.status(401).json({ error: 'Invalid token' });
+      }
       req.user = user;
       next();
     });
@@ -25,23 +29,33 @@ export function authenticateJWT(req, res, next) {
 // POST /api/login
 router.post('/login', (req, res) => {
   const { username, password } = req.body;
-  if (username === DEMO_USER.username && password === DEMO_USER.password) {
-    const token = jwt.sign({ username }, JWT_SECRET, { expiresIn: '7d' });
+  if (username === AUTH.DEMO_USER.username && password === AUTH.DEMO_USER.password) {
+    const token = jwt.sign({ username }, ENV.JWT_SECRET, { expiresIn: AUTH.TOKEN_EXPIRY });
+    logger.info({ username }, 'User logged in successfully');
     return res.json({
       token,
       user: { username },
       message: 'Login successful'
     });
   }
+  
+  logger.warn({ username, ip: req.ip }, 'Login attempt with invalid credentials');
   res.status(401).json({ error: 'Invalid credentials' });
 });
 
 // POST /api/init-session
 router.post('/init-session', async (req, res) => {
   const { apiUrl, auth } = req.body;
-  if (!apiUrl || !auth) return res.status(400).json({ error: 'Missing data' });
+  
+  if (!apiUrl || !auth) {
+    logger.warn({ ip: req.ip }, 'Session initialization failed - missing data');
+    return res.status(400).json({ error: 'Missing data' });
+  }
+  
   const sessionId = 'session:' + Date.now().toString(36) + Math.random().toString(36).substr(2, 6);
-  await redis.set(sessionId, JSON.stringify({ apiUrl, auth }), 'EX', 604800); // add 1 week
+  await redis.set(sessionId, JSON.stringify({ apiUrl, auth }), 'EX', QUEUE.SESSION_TTL);
+  
+  logger.info({ sessionId }, 'New session initialized');
   res.json({ sessionId });
 });
 
@@ -66,6 +80,7 @@ router.get('/sessions', async (req, res) => {
     );
     res.json(sessionInfo);
   } catch (err) {
+    logger.error({ error: err.message }, 'Failed to fetch sessions');
     res.status(500).json({ error: err.message });
   }
 });
