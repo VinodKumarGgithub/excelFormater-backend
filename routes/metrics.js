@@ -1,5 +1,8 @@
 import express from 'express';
-import redis from '../redis.js';
+
+// Import from new module structure
+import redis from '../lib/config/redisConfig.js';
+import { logger } from '../lib/services/loggerService.js';
 import { authenticateJWT } from './sessions.js';
 
 const router = express.Router();
@@ -11,8 +14,16 @@ router.get('/metrics/:jobId', async (req, res) => {
   try {
     const { jobId } = req.params;
     const metrics = await redis.hgetall(`metrics:${jobId}`);
-    res.json(metrics || { error: 'No metrics found for this job' });
+    
+    if (!metrics || Object.keys(metrics).length === 0) {
+      logger.warn({ jobId }, 'No metrics found for job');
+      return res.json({ error: 'No metrics found for this job' });
+    }
+    
+    logger.debug({ jobId }, 'Retrieved job metrics');
+    res.json(metrics);
   } catch (err) {
+    logger.error({ error: err.message, jobId: req.params.jobId }, 'Failed to retrieve job metrics');
     res.status(500).json({ error: err.message });
   }
 });
@@ -24,9 +35,20 @@ router.get('/worker-metrics', async (req, res) => {
     const keys = await redis.keys('worker:globalMetrics:*');
     const allMetrics = await Promise.all(keys.map(key => redis.get(key)));
     const parsedMetrics = allMetrics
-      .map(m => { try { return JSON.parse(m); } catch { return null; } })
+      .map(m => { 
+        try { 
+          return JSON.parse(m); 
+        } catch (e) { 
+          logger.warn({ error: e.message }, 'Failed to parse worker metrics');
+          return null; 
+        } 
+      })
       .filter(Boolean);
-    if (parsedMetrics.length === 0) return res.status(404).json({ error: 'No metrics available' });
+      
+    if (parsedMetrics.length === 0) {
+      logger.warn('No worker metrics available');
+      return res.status(404).json({ error: 'No metrics available' });
+    }
 
     // Aggregate global summary
     const summary = {
@@ -43,11 +65,13 @@ router.get('/worker-metrics', async (req, res) => {
       timestamp: Date.now()
     };
 
+    logger.debug({ workerCount: parsedMetrics.length }, 'Retrieved worker metrics');
     res.json({
       summary,
       workers: parsedMetrics
     });
   } catch (err) {
+    logger.error({ error: err.message }, 'Failed to retrieve worker metrics');
     res.status(500).json({ error: err.message });
   }
 });

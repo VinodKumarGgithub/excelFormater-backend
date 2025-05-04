@@ -1,19 +1,23 @@
 import express from 'express';
 import { Queue } from 'bullmq';
 import { createBullBoard } from '@bull-board/api';
-// import { BullMQAdapter } from '@bull-board/api/bullMQAdapter';
 import { BullMQAdapter } from '@bull-board/api/bullMQAdapter.js';
-
 import { ExpressAdapter } from '@bull-board/express';
-import redis from './redis.js';
 import cors from 'cors';
+
+// Import configurations
+import { ENV } from './lib/config/appConfig.js';
+import redis from './lib/config/redisConfig.js';
+import { logger } from './lib/services/loggerService.js';
+
+// Import routes
 import jobsRouter from './routes/jobs.js';
 import logsRouter from './routes/logs.js';
 import sessionsRouter from './routes/sessions.js';
 import metricsRouter from './routes/metrics.js';
 
 const app = express();
-const port = 3000;
+const port = ENV.PORT;
 const batchQueue = new Queue('batchQueue', { connection: redis });
 
 // Bull Board setup
@@ -24,18 +28,19 @@ createBullBoard({
   serverAdapter,
 });
 
+// Middleware
 app.use(cors());
 app.use(express.json());
+
+// Routes
 app.use('/admin/queues', serverAdapter.getRouter());
 app.use('/api', sessionsRouter);
 app.use('/api', jobsRouter);
 app.use('/api', logsRouter);
 app.use('/api', metricsRouter);
 
+// Start server
 app.listen(port, () => {
-  console.log(`Server running at http://localhost:${port}`);
-  // console.log(`Bull Board at http://localhost:${port}/admin/queues`);
-  // console.log(`Logs API at http://localhost:${port}/api/logs/:sessionId`);
-  // console.log(`Sessions API at http://localhost:${port}/api/sessions`);
-  // console.log(`Metrics API at http://localhost:${port}/api/metrics/:jobId`);
+  logger.info(`Server running at http://localhost:${port}`);
+  logger.info(`Bull Board available at http://localhost:${port}/admin/queues`);
 });

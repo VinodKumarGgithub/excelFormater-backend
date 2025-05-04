@@ -1,75 +1,80 @@
-import { Worker, Job } from 'bullmq';
-import fs from 'fs/promises';
-import redis from './redis.js';
-import path from 'path';
+import { Worker } from 'bullmq';
 import os from 'os';
-import { log } from './logger.js';
-import {
-  processRecord,
-  validateJobData,
-  createAuthHeaders,
-  getQueueBacklog,
-  getApiErrorRate,
-  getApiRateLimitStatus
-} from './utils.js';
 
+// Import from new modular structure
+import redis from './lib/config/redisConfig.js';
+import { log, logger } from './lib/services/loggerService.js';
+
+// Import constants
+import {
+  MIN_CONCURRENCY,
+  MAX_CONCURRENCY,
+  COOLDOWN_MS,
+  CIRCUIT_BREAKER_ERROR_THRESHOLD,
+  CIRCUIT_BREAKER_RESET_TIMEOUT
+} from './lib/constants/concurrency.js';
+
+// Import helpers and services
+import { validateJobData } from './lib/helpers/validation.js';
+import { createAuthHeaders } from './lib/helpers/auth.js';
+import { processRecord } from './lib/services/processRecord.js';
+import { getQueueBacklog } from './lib/services/queueManager.js';
+import { getApiErrorRate } from './lib/helpers/metrics.js';
+import { getConcurrencyStatus } from './lib/services/concurrencyManager.js';
+
+// Allow self-signed certificates in development
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 
-// Dynamic concurrency management
-const MIN_CONCURRENCY = 20;
-const MAX_CONCURRENCY = 50;
-let currentConcurrency = 20;
+// Current worker instance
 let workerInstance = null;
-let lastConcurrencyChange = 0;
-const COOLDOWN_MS = 30000; // 30 seconds cooldown between changes
-let consecutiveDecreaseTriggers = 0;
-const MAX_DECREASE_STEP = 3;
-
-// Helper for moving average
-let cpuHistory = [];
-let memHistory = [];
-let errorRateHistory = [];
-const HISTORY_LENGTH = 5;
-
+let currentConcurrency = MIN_CONCURRENCY;
 const WORKER_ID = process.env.WORKER_ID || Math.random().toString(36).slice(2, 10);
 
-function movingAverage(arr) {
-  if (arr.length === 0) return 0;
-  return arr.reduce((a, b) => a + b, 0) / arr.length;
-}
-
+/**
+ * Create a worker with the specified concurrency
+ * @param {number} concurrency - Number of concurrent jobs
+ */
 function createWorker(concurrency) {
   if (workerInstance) {
     workerInstance.close();
   }
+  
+  // Get concurrency status for logging
+  const concurrencyStatus = getConcurrencyStatus();
+  
+  logger.info({ 
+    concurrency, 
+    status: concurrencyStatus
+  }, 'Creating worker instance');
+  
   workerInstance = new Worker(
-    'batchQueue',
-    async (job) => {
-      const { sessionId, records, verbose = false } = job.data;
-      const jobId = job.id;
-      let successCount = 0;
-      let failureCount = 0;
+  'batchQueue',
+  async (job) => {
+    const { sessionId, records, verbose = false } = job.data;
+    const jobId = job.id;
+    let successCount = 0;
+    let failureCount = 0;
 
-      // Validate job data
+    // Validate job data
       validateJobData(records);
 
-      const configJson = await redis.get(sessionId);
-      if (!configJson) {
-        throw new Error(`No config found for sessionId: ${sessionId}`);
-      }
+    const configJson = await redis.get(sessionId);
+    if (!configJson) {
+      throw new Error(`No config found for sessionId: ${sessionId}`);
+    }
 
-      const { apiUrl, auth } = JSON.parse(configJson);
+    const { apiUrl, auth } = JSON.parse(configJson);
       const headers = createAuthHeaders(auth);
 
-      await log({
-        sessionId,
-        jobId,
-        type: 'START',
-        message: `Processing batch of ${records.length} records`,
-        meta: { totalRecords: records.length }
-      });
+    await log({
+      sessionId,
+      jobId,
+      type: 'START',
+      message: `Processing batch of ${records.length} records`,
+      meta: { totalRecords: records.length }
+    });
 
-      // Process records with progress tracking
+    // Process records with progress tracking
       let startTime = Date.now();
       const startedAt = new Date(startTime).toISOString();
       await log({
@@ -82,16 +87,17 @@ function createWorker(concurrency) {
           startedAt
         }
       });
+      
       let processedCount = 0;
       let totalProcessingTime = 0;
-      for (let i = 0; i < records.length; i++) {
+    for (let i = 0; i < records.length; i++) {
         const recordStart = Date.now();
-        try {
-          await processRecord(records[i], apiUrl, headers, sessionId, jobId, i, records.length);
-          successCount++;
-        } catch (err) {
-          failureCount++;
-        }
+      try {
+        await processRecord(records[i], apiUrl, headers, sessionId, jobId, i, records.length);
+        successCount++;
+      } catch (err) {
+        failureCount++;
+      }
         const recordEnd = Date.now();
         processedCount++;
         totalProcessingTime += (recordEnd - recordStart);
@@ -104,9 +110,7 @@ function createWorker(concurrency) {
 
         // Get global metrics for graphing
         const backlog = await getQueueBacklog();
-        const avgCpu = movingAverage(cpuHistory);
-        const avgMem = movingAverage(memHistory);
-        const avgError = movingAverage(errorRateHistory);
+        const concurrencyStatus = getConcurrencyStatus();
 
         // Maintain a short history for graphing
         if (!global.progressHistory) global.progressHistory = [];
@@ -118,33 +122,28 @@ function createWorker(concurrency) {
           estTimeLeftSec,
           currentConcurrency,
           backlog,
-          avgCpu,
-          avgMem,
-          avgError,
           successCount,
           failureCount,
-          consecutiveDecreaseTriggers
+          ...concurrencyStatus
         });
         if (global.progressHistory.length > 20) global.progressHistory.shift();
 
-        // Update progress
-        if (i % 5 === 0 || i === records.length - 1) {
-          await job.updateProgress({
-            completed: i + 1,
-            total: records.length,
-            successCount,
+      // Update progress
+      if (i % 5 === 0 || i === records.length - 1) {
+        await job.updateProgress({
+          completed: i + 1,
+          total: records.length,
+          successCount,
             failureCount,
             meta: {
               avgTimePerRecordMs: Math.round(avgTimePerRecord),
               estTimeLeftSec,
               currentConcurrency,
               backlog,
-              avgCpu,
-              avgMem,
-              avgError,
-              consecutiveDecreaseTriggers
+              ...concurrencyStatus
             }
           });
+          
           // Log batch progress
           await log({
             sessionId,
@@ -158,12 +157,10 @@ function createWorker(concurrency) {
               estTimeLeftSec,
               currentConcurrency,
               backlog,
-              avgCpu,
-              avgMem,
-              avgError,
-              consecutiveDecreaseTriggers
+              ...concurrencyStatus
             }
           });
+          
           // Store global metrics in Redis
           const globalMetrics = {
             workerId: WORKER_ID,
@@ -175,24 +172,21 @@ function createWorker(concurrency) {
             total: records.length,
             completed: i + 1,
             backlog,
-            avgCpu,
-            avgMem,
-            avgError,
-            consecutiveDecreaseTriggers,
+            ...concurrencyStatus,
             progressHistory: global.progressHistory,
             timestamp: Date.now()
           };
           await redis.set(`worker:globalMetrics:${WORKER_ID}`, JSON.stringify(globalMetrics));
-        }
       }
+    }
 
-      // Store job metrics
-      await redis.hset(`metrics:${jobId}`, {
-        successCount,
-        failureCount,
-        totalRecords: records.length,
-        completedAt: new Date().toISOString()
-      });
+    // Store job metrics
+    await redis.hset(`metrics:${jobId}`, {
+      successCount,
+      failureCount,
+      totalRecords: records.length,
+      completedAt: new Date().toISOString()
+    });
 
       await log({
         sessionId,
@@ -219,110 +213,84 @@ function createWorker(concurrency) {
         }
       });
 
-      return {
-        successCount,
-        failureCount,
-        totalRecords: records.length
-      };
-    },
-    {
-      concurrency,
-      limiter: {
-        max: 1000,
-        duration: 5000
-      },
-      settings: {
-        retryProcessDelay: 5000,
-        backoffDelay: 5000
-      }
-    }
-  );
-
-  // Enhanced event handlers
-  workerInstance.on('completed', async (job) => {
-    const { successCount, failureCount, totalRecords } = job.returnvalue;
-    log.info({
-      jobId: job.id,
+    return {
       successCount,
       failureCount,
-      totalRecords
-    }, 'Job completed');
-  });
+      totalRecords: records.length
+    };
+  },
+  {
+      concurrency,
+    limiter: {
+      max: 1000,
+      duration: 5000
+    },
+    settings: {
+      retryProcessDelay: 5000,
+      backoffDelay: 5000
+    }
+  }
+);
+
+// Enhanced event handlers
+  workerInstance.on('completed', async (job) => {
+  const { successCount, failureCount, totalRecords } = job.returnvalue;
+  logger.info({
+    jobId: job.id,
+    successCount,
+    failureCount,
+    totalRecords
+  }, 'Job completed');
+});
 
   workerInstance.on('failed', async (job, err) => {
-    log.error({
-      jobId: job.id,
-      error: err.message,
-      stack: err.stack
-    }, 'Job failed');
-  });
+  logger.error({
+    jobId: job.id,
+    error: err.message,
+    stack: err.stack
+  }, 'Job failed');
+});
 
   workerInstance.on('progress', (job, progress) => {
-    log.info({
-      jobId: job.id,
-      ...progress
-    }, 'Job progress update');
-  });
+  logger.info({
+    jobId: job.id,
+    ...progress
+  }, 'Job progress update');
+});
 
-  log.info({ concurrency }, 'Worker started with concurrency');
+  logger.info({ concurrency }, 'Worker started with concurrency');
 }
 
-async function monitorAndAdjustConcurrency() {
-  setInterval(async () => {
-    const now = Date.now();
-    const cpu = os.loadavg()[0];
-    const mem = os.freemem() / os.totalmem();
-    const backlog = await getQueueBacklog();
-    const apiErrorRate = getApiErrorRate();
-
-    // Update histories
-    cpuHistory.push(cpu); if (cpuHistory.length > HISTORY_LENGTH) cpuHistory.shift();
-    memHistory.push(mem); if (memHistory.length > HISTORY_LENGTH) memHistory.shift();
-    errorRateHistory.push(apiErrorRate); if (errorRateHistory.length > HISTORY_LENGTH) errorRateHistory.shift();
-
-    const avgCpu = movingAverage(cpuHistory);
-    const avgMem = movingAverage(memHistory);
-    const avgError = movingAverage(errorRateHistory);
-
-    log.info({
-      avgCpu, avgMem, avgError, backlog, currentConcurrency, consecutiveDecreaseTriggers
-    }, 'Resource metrics for concurrency tuning');
-
-    // Cooldown logic
-    if (now - lastConcurrencyChange < COOLDOWN_MS) return;
-
-    // Enhanced logic
-    if (avgCpu < 1 && avgMem > 0.5 && backlog > 10 && avgError < 0.05) {
-      consecutiveDecreaseTriggers = 0;
-      if (currentConcurrency < MAX_CONCURRENCY) {
-        currentConcurrency++;
-        createWorker(currentConcurrency);
-        lastConcurrencyChange = now;
-        log.info({ currentConcurrency }, 'Increased concurrency');
-      }
-    } else if (avgCpu > 2 || avgMem < 0.2 || avgError > 0.1) {
-      consecutiveDecreaseTriggers++;
-      let decreaseStep = Math.min(consecutiveDecreaseTriggers, MAX_DECREASE_STEP);
-      let newConcurrency = Math.max(MIN_CONCURRENCY, currentConcurrency - decreaseStep);
-      if (newConcurrency < currentConcurrency) {
-        currentConcurrency = newConcurrency;
-        createWorker(currentConcurrency);
-        lastConcurrencyChange = now;
-        log.info({ currentConcurrency, decreaseStep }, 'Decreased concurrency with backoff');
-      }
-    } else {
-      consecutiveDecreaseTriggers = 0;
-    }
-  }, 30000);
+/**
+ * Start the worker with concurrency monitoring
+ */
+function startWorker() {
+  // Create initial worker
+  createWorker(currentConcurrency);
+  
+  // Import the monitor function dynamically to avoid circular dependencies
+  import('./lib/services/concurrencyManager.js')
+    .then(({ monitorAndAdjustConcurrency }) => {
+      // Set up periodic concurrency monitoring
+      setInterval(async () => {
+        const workerUpdate = await monitorAndAdjustConcurrency();
+        if (workerUpdate) {
+          currentConcurrency = workerUpdate.concurrency;
+          createWorker(currentConcurrency);
+        }
+      }, COOLDOWN_MS);
+    })
+    .catch(err => {
+      logger.error({ error: err.message }, 'Failed to import concurrency monitor');
+    });
 }
 
-// On startup
-createWorker(currentConcurrency);
-monitorAndAdjustConcurrency();
+// Start the worker
+startWorker();
 
 // Graceful shutdown
 process.on('SIGTERM', async () => {
-  log.info('Shutting down worker...');
+  logger.info('Shutting down worker...');
   if (workerInstance) await workerInstance.close();
   process.exit(0);
 });
