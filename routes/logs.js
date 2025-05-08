@@ -4,6 +4,7 @@ import express from 'express';
 import redis from '../lib/config/redisConfig.js';
 import { logger } from '../lib/services/loggerService.js';
 import { authenticateJWT } from './sessions.js';
+import { getSuccessfulResponses } from '../lib/services/processRecord.js';
 
 const router = express.Router();
 
@@ -59,6 +60,33 @@ router.get('/logs/:sessionId', async (req, res) => {
     });
   } catch (err) {
     logger.error({ error: err.message, sessionId: req.params.sessionId }, 'Failed to fetch logs');
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/logs/:sessionId/success
+// Retrieve successful API responses for a session
+router.get('/logs/:sessionId/success', async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+    const { limit = 100 } = req.query;
+    
+    logger.debug({ sessionId, limit }, 'Fetching successful API responses');
+    
+    // Get successful responses using our new function
+    const responses = await getSuccessfulResponses(sessionId);
+    
+    // Limit the number of responses if needed
+    const limitedResponses = responses.slice(0, parseInt(limit));
+    
+    res.json({
+      sessionId,
+      total: responses.length,
+      count: limitedResponses.length,
+      responses: limitedResponses
+    });
+  } catch (err) {
+    logger.error({ error: err.message, sessionId: req.params.sessionId }, 'Failed to fetch successful API responses');
     res.status(500).json({ error: err.message });
   }
 });
