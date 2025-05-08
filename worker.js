@@ -17,10 +17,11 @@ import {
 // Import helpers and services
 import { validateJobData } from './lib/helpers/validation.js';
 import { createAuthHeaders } from './lib/helpers/auth.js';
-import { processRecord } from './lib/services/processRecord.js';
+import { processRecord, batchProcessRecords } from './lib/services/processRecord.js';
 import { getQueueBacklog } from './lib/services/queueManager.js';
 import { getApiErrorRate } from './lib/helpers/metrics.js';
 import { getConcurrencyStatus } from './lib/services/concurrencyManager.js';
+import workerPool from './lib/services/workerPool.js';
 
 // Allow self-signed certificates in development
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
@@ -56,7 +57,7 @@ function createWorker(concurrency) {
     let failureCount = 0;
 
     // Validate job data
-      validateJobData(records);
+    validateJobData(records);
 
     const configJson = await redis.get(sessionId);
     if (!configJson) {
@@ -64,7 +65,7 @@ function createWorker(concurrency) {
     }
 
     const { apiUrl, auth } = JSON.parse(configJson);
-      const headers = createAuthHeaders(auth);
+    const headers = createAuthHeaders(auth);
 
     await log({
       sessionId,
@@ -75,29 +76,151 @@ function createWorker(concurrency) {
     });
 
     // Process records with progress tracking
-      let startTime = Date.now();
-      const startedAt = new Date(startTime).toISOString();
-      await log({
-        sessionId,
-        jobId,
-        type: 'JOB_STARTED',
-        message: 'Job started',
-        meta: {
-          totalRecords: records.length,
-          startedAt
-        }
-      });
+    let startTime = Date.now();
+    const startedAt = new Date(startTime).toISOString();
+    await log({
+      sessionId,
+      jobId,
+      type: 'JOB_STARTED',
+      message: 'Job started',
+      meta: {
+        totalRecords: records.length,
+        startedAt
+      }
+    });
+    
+    // Initialize worker pool if needed
+    if (!workerPool.initialized) {
+      await workerPool.initialize();
+      logger.info('Worker pool initialized for batch processing');
+    }
+    
+    // Use batch processing with worker pool for improved performance
+    try {
+      // Process in batches to improve performance and maintain progress updates
+      const BATCH_SIZE = 10; // Process 10 records at a time
+      let processedCount = 0;
+      let totalProcessingTime = 0;
+      
+      for (let i = 0; i < records.length; i += BATCH_SIZE) {
+        const batchStart = Date.now();
+        const batchRecords = records.slice(i, i + BATCH_SIZE);
+        
+        // Process batch using worker pool
+        const batchResults = await batchProcessRecords(
+          batchRecords, 
+          apiUrl, 
+          headers, 
+          sessionId, 
+          jobId
+        );
+        
+        // Update success/failure counts
+        const batchSuccessCount = batchResults.filter(r => r.success).length;
+        const batchFailureCount = batchResults.length - batchSuccessCount;
+        
+        successCount += batchSuccessCount;
+        failureCount += batchFailureCount;
+        
+        const batchEnd = Date.now();
+        processedCount += batchRecords.length;
+        totalProcessingTime += (batchEnd - batchStart);
+        
+        // Calculate ETA
+        const avgTimePerRecord = processedCount > 0 ? totalProcessingTime / processedCount : 0;
+        const recordsLeft = records.length - (i + batchRecords.length);
+        const estTimeLeftMs = avgTimePerRecord * recordsLeft / currentConcurrency;
+        const estTimeLeftSec = Math.round(estTimeLeftMs / 1000);
+        
+        // Get global metrics for graphing
+        const backlog = await getQueueBacklog();
+        const concurrencyStatus = getConcurrencyStatus();
+        
+        // Maintain a short history for graphing
+        if (!global.progressHistory) global.progressHistory = [];
+        global.progressHistory.push({
+          timestamp: Date.now(),
+          completed: processedCount,
+          total: records.length,
+          avgTimePerRecordMs: Math.round(avgTimePerRecord),
+          estTimeLeftSec,
+          currentConcurrency,
+          backlog,
+          successCount,
+          failureCount,
+          ...concurrencyStatus
+        });
+        if (global.progressHistory.length > 20) global.progressHistory.shift();
+        
+        // Update progress
+        await job.updateProgress({
+          completed: processedCount,
+          total: records.length,
+          successCount,
+          failureCount,
+          meta: {
+            avgTimePerRecordMs: Math.round(avgTimePerRecord),
+            estTimeLeftSec,
+            currentConcurrency,
+            backlog,
+            ...concurrencyStatus
+          }
+        });
+        
+        // Log batch progress
+        await log({
+          sessionId,
+          jobId,
+          type: 'PROGRESS',
+          message: `Batch progress: ${processedCount}/${records.length}`,
+          meta: {
+            successCount,
+            failureCount,
+            avgTimePerRecordMs: Math.round(avgTimePerRecord),
+            estTimeLeftSec,
+            currentConcurrency,
+            backlog,
+            ...concurrencyStatus
+          }
+        });
+        
+        // Store global metrics in Redis
+        const globalMetrics = {
+          workerId: WORKER_ID,
+          currentConcurrency,
+          avgTimePerRecordMs: Math.round(avgTimePerRecord),
+          estTimeLeftSec,
+          successCount,
+          failureCount,
+          total: records.length,
+          completed: processedCount,
+          backlog,
+          ...concurrencyStatus,
+          progressHistory: global.progressHistory,
+          timestamp: Date.now()
+        };
+        await redis.set(`worker:globalMetrics:${WORKER_ID}`, JSON.stringify(globalMetrics));
+      }
+    } catch (error) {
+      logger.error({
+        error: error.message,
+        stack: error.stack
+      }, 'Error in batch processing');
+      
+      // Continue with individual processing for resilience
+      logger.info('Falling back to individual record processing');
       
       let processedCount = 0;
       let totalProcessingTime = 0;
-    for (let i = 0; i < records.length; i++) {
+      
+      for (let i = 0; i < records.length; i++) {
         const recordStart = Date.now();
-      try {
-        await processRecord(records[i], apiUrl, headers, sessionId, jobId, i, records.length);
-        successCount++;
-      } catch (err) {
-        failureCount++;
-      }
+        try {
+          await processRecord(records[i], apiUrl, headers, sessionId, jobId, i, records.length);
+          successCount++;
+        } catch (err) {
+          failureCount++;
+        }
         const recordEnd = Date.now();
         processedCount++;
         totalProcessingTime += (recordEnd - recordStart);
@@ -128,12 +251,12 @@ function createWorker(concurrency) {
         });
         if (global.progressHistory.length > 20) global.progressHistory.shift();
 
-      // Update progress
-      if (i % 5 === 0 || i === records.length - 1) {
-        await job.updateProgress({
-          completed: i + 1,
-          total: records.length,
-          successCount,
+        // Update progress
+        if (i % 5 === 0 || i === records.length - 1) {
+          await job.updateProgress({
+            completed: i + 1,
+            total: records.length,
+            successCount,
             failureCount,
             meta: {
               avgTimePerRecordMs: Math.round(avgTimePerRecord),
@@ -177,6 +300,7 @@ function createWorker(concurrency) {
             timestamp: Date.now()
           };
           await redis.set(`worker:globalMetrics:${WORKER_ID}`, JSON.stringify(globalMetrics));
+        }
       }
     }
 
@@ -188,30 +312,30 @@ function createWorker(concurrency) {
       completedAt: new Date().toISOString()
     });
 
-      await log({
-        sessionId,
-        jobId,
-        type: 'COMPLETE',
-        message: `Batch processing complete`,
-        meta: { successCount, failureCount, totalRecords: records.length }
-      });
+    await log({
+      sessionId,
+      jobId,
+      type: 'COMPLETE',
+      message: `Batch processing complete`,
+      meta: { successCount, failureCount, totalRecords: records.length }
+    });
 
-      // Log job completed with timing and stats
-      const completedAt = new Date().toISOString();
-      await log({
-        sessionId,
-        jobId,
-        type: 'JOB_COMPLETED',
-        message: 'Job completed',
-        meta: {
-          totalRecords: records.length,
-          successCount,
-          failureCount,
-          startedAt,
-          completedAt,
-          durationSec: Math.round((Date.parse(completedAt) - Date.parse(startedAt)) / 1000)
-        }
-      });
+    // Log job completed with timing and stats
+    const completedAt = new Date().toISOString();
+    await log({
+      sessionId,
+      jobId,
+      type: 'JOB_COMPLETED',
+      message: 'Job completed',
+      meta: {
+        totalRecords: records.length,
+        successCount,
+        failureCount,
+        startedAt,
+        completedAt,
+        durationSec: Math.round((Date.parse(completedAt) - Date.parse(startedAt)) / 1000)
+      }
+    });
 
     return {
       successCount,
@@ -220,7 +344,7 @@ function createWorker(concurrency) {
     };
   },
   {
-      concurrency,
+    concurrency,
     limiter: {
       max: 1000,
       duration: 5000
@@ -249,48 +373,122 @@ function createWorker(concurrency) {
     error: err.message,
     stack: err.stack
   }, 'Job failed');
+  
+  if (job && job.data) {
+    const { sessionId } = job.data;
+    await log({
+      sessionId,
+      jobId: job.id,
+      type: 'JOB_FAILED',
+      message: 'Job failed',
+      meta: {
+        error: err.message
+      }
+    });
+  }
 });
 
-  workerInstance.on('progress', (job, progress) => {
-  logger.info({
-    jobId: job.id,
-    ...progress
-  }, 'Job progress update');
-});
-
-  logger.info({ concurrency }, 'Worker started with concurrency');
+  // Return worker instance
+  return workerInstance;
 }
 
 /**
- * Start the worker with concurrency monitoring
+ * Start the worker with dynamic concurrency
  */
 function startWorker() {
+  const autoScaleInterval = setInterval(async () => {
+    try {
+      // Check API error rates
+      const errorRate = getApiErrorRate();
+      
+      // Circuit breaker logic
+      if (errorRate > CIRCUIT_BREAKER_ERROR_THRESHOLD) {
+        // Log circuit breaker activation
+        logger.warn({
+          errorRate,
+          threshold: CIRCUIT_BREAKER_ERROR_THRESHOLD,
+          timeout: CIRCUIT_BREAKER_RESET_TIMEOUT
+        }, 'Circuit breaker activated');
+        
+        // Record in Redis
+        await redis.hset('metrics:circuitBreaker', {
+          lastTripped: Date.now().toString(),
+          reason: `Error rate (${errorRate}) exceeded threshold (${CIRCUIT_BREAKER_ERROR_THRESHOLD})`,
+          resetTimeout: CIRCUIT_BREAKER_RESET_TIMEOUT.toString()
+        });
+      }
+      
+      // Auto-scaling logic based on queue backlog and API health
+      const backlog = await getQueueBacklog();
+      let newConcurrency = currentConcurrency;
+      
+      if (errorRate > 0.1) {
+        // High error rate - reduce concurrency
+        newConcurrency = Math.max(MIN_CONCURRENCY, Math.floor(currentConcurrency * 0.8));
+      } else if (backlog > 10 && errorRate < 0.05 && currentConcurrency < MAX_CONCURRENCY) {
+        // High backlog, low error rate - increase concurrency
+        newConcurrency = Math.min(MAX_CONCURRENCY, currentConcurrency + 1);
+      } else if (backlog < 3 && currentConcurrency > MIN_CONCURRENCY) {
+        // Low backlog - decrease concurrency
+        newConcurrency = Math.max(MIN_CONCURRENCY, currentConcurrency - 1);
+      }
+      
+      // Apply changes if concurrency level changed
+      if (newConcurrency !== currentConcurrency) {
+        logger.info({
+          previousConcurrency: currentConcurrency,
+          newConcurrency,
+          backlog,
+          errorRate
+        }, 'Adjusting concurrency');
+        
+        currentConcurrency = newConcurrency;
+        createWorker(currentConcurrency);
+      }
+    } catch (err) {
+      logger.error({
+        error: err.message,
+        stack: err.stack
+      }, 'Error in worker auto-scaling');
+    }
+  }, 60000); // Check every 60 seconds
+  
   // Create initial worker
   createWorker(currentConcurrency);
   
-  // Import the monitor function dynamically to avoid circular dependencies
-  import('./lib/services/concurrencyManager.js')
-    .then(({ monitorAndAdjustConcurrency }) => {
-      // Set up periodic concurrency monitoring
-      setInterval(async () => {
-        const workerUpdate = await monitorAndAdjustConcurrency();
-        if (workerUpdate) {
-          currentConcurrency = workerUpdate.concurrency;
-          createWorker(currentConcurrency);
-        }
-      }, COOLDOWN_MS);
-    })
-    .catch(err => {
-      logger.error({ error: err.message }, 'Failed to import concurrency monitor');
-    });
+  // Start worker pool for API calls
+  workerPool.initialize().catch(err => {
+    logger.error({
+      error: err.message,
+      stack: err.stack
+    }, 'Failed to initialize worker pool');
+  });
+  
+  // Graceful shutdown
+  process.on('SIGTERM', async () => {
+    logger.info('Received SIGTERM, shutting down worker');
+    clearInterval(autoScaleInterval);
+    
+    try {
+      if (workerInstance) {
+        await workerInstance.close();
+      }
+      
+      // Shutdown worker pool
+      await workerPool.shutdown();
+      
+      logger.info('Worker shutdown complete');
+    } catch (err) {
+      logger.error({
+        error: err.message,
+        stack: err.stack
+      }, 'Error during worker shutdown');
+    } finally {
+      process.exit(0);
+    }
+  });
 }
 
-// Start the worker
 startWorker();
 
-// Graceful shutdown
-process.on('SIGTERM', async () => {
-  logger.info('Shutting down worker...');
-  if (workerInstance) await workerInstance.close();
-  process.exit(0);
-});
+export { startWorker };
