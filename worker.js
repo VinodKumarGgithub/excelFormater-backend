@@ -19,28 +19,261 @@ const api = axios.create({
   validateStatus: status => status < 500 // Retry only on 500+ errors
 });
 
+// Save API request/response data and update session statistics
+async function trackApiCall(sessionId, requestData, responseData) {
+  try {
+    // Generate unique ID using timestamp and random value
+    const reqId = `${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
+
+    // Determine if the response should be considered a failure based on status code
+    // Consider any 4xx or 5xx response as a failure
+    const statusCode = responseData.status || responseData.error?.status || 0;
+    const isHttpError = statusCode >= 400;
+    
+    // Override the success flag if we have an HTTP error status
+    if (isHttpError && responseData.success) {
+      responseData.success = false;
+    }
+
+    // Store request/response in Redis hash (efficient for large number of fields)
+    // Key format: apidata:{sessionId}:{reqId}
+    const key = `apidata:${sessionId}:${reqId}`;
+    const dataToStore = {
+      timestamp: new Date().toISOString(),
+      requestUrl: requestData.url,
+      requestMethod: 'POST',
+      requestHeaders: JSON.stringify(requestData.headers),
+      requestBody: JSON.stringify(requestData.body),
+      responseStatus: statusCode,
+      responseHeaders: JSON.stringify(responseData.headers || {}),
+      responseData: JSON.stringify(responseData.data || responseData.error || {}),
+      success: responseData.success ? '1' : '0',
+      error: responseData.error?.message || (isHttpError ? `HTTP Error: ${statusCode}` : ''),
+      timeMs: responseData.timeMs || 0,
+    };
+    
+    // Use hmset to store all fields at once
+    await redis.hmset(key, dataToStore);
+    
+    // Store this request ID in a sorted set by timestamp for easy retrieval
+    // Using timestamp as score for chronological sorting
+    await redis.zadd(`apirequests:${sessionId}`, Date.now(), reqId);
+    
+    // Update session-level statistics
+    const pipeline = redis.pipeline();
+    
+    // Increment total request count
+    pipeline.hincrby(`apistats:${sessionId}`, 'total', 1);
+    
+    // Increment success or failure count
+    if (responseData.success) {
+      pipeline.hincrby(`apistats:${sessionId}`, 'success', 1);
+    } else {
+      pipeline.hincrby(`apistats:${sessionId}`, 'failure', 1);
+    }
+    
+    // Track status code distribution
+    if (statusCode) {
+      pipeline.hincrby(`apistats:${sessionId}`, `status:${statusCode}`, 1);
+    }
+    
+    // Execute all updates atomically
+    await pipeline.exec();
+    
+    return reqId;
+  } catch (err) {
+    console.error('Error tracking API call:', err.message);
+    // Don't throw - logging shouldn't interrupt processing
+    return null;
+  }
+}
+
 // Process single record with retries
 async function processRecord(record, apiUrl, headers, sessionId, jobId, recordIndex, totalRecords) {
   const maxRetries = 3;
   let attempt = 0;
 
+  // Prepare request data
+  const requestData = {
+    url: apiUrl,
+    headers,
+    body: record,
+    sessionId,
+    jobId,
+    recordIndex
+  };
+
   while (attempt < maxRetries) {
+    const startTime = Date.now();
+    
     try {
       // Use rate limiter for API calls
       const response = await limiter.schedule(() => 
         api.post(apiUrl, record, { headers })
       );
-
+      
+      // Check if this is a 4xx or 5xx response
+      const isHttpError = response.status >= 400;
+      
+      // Prepare response data
+      const responseData = {
+        status: response.status,
+        headers: response.headers,
+        data: response.data,
+        success: !isHttpError, // Mark 4xx/5xx as failures
+        timeMs: Date.now() - startTime,
+        attempt: attempt + 1
+      };
+      
+      // For HTTP errors, add error information
+      if (isHttpError) {
+        responseData.error = {
+          message: response.headers['response-description'] || `HTTP Error: ${response.status}`,
+          name: 'HttpError',
+          httpStatus: response.status
+        };
+      }
+      
+      // Track this API call
+      await trackApiCall(sessionId, requestData, responseData);
+      
+      // Only retry on 5xx errors (server errors)
+      if (response.status >= 500 && attempt < maxRetries - 1) {
+        attempt++;
+        // Exponential backoff for server errors
+        await new Promise(resolve => setTimeout(resolve, Math.pow(2, attempt) * 1000));
+        continue;
+      }
+      
       return response;
     } catch (err) {
       attempt++;
       const isLastAttempt = attempt === maxRetries;
+      
+      // Prepare error response data
+      const errorData = {
+        status: err.response?.status,
+        headers: err.response?.headers,
+        data: err.response?.data,
+        error: {
+          message: err.message || err.response?.headers['response-description'],
+          name: err.name,
+          stack: process.env.NODE_ENV === 'production' ? null : err.stack
+        },
+        success: false,
+        timeMs: Date.now() - startTime,
+        attempt
+      };
+      
+      // Track this failed API call
+      await trackApiCall(sessionId, requestData, errorData);
       
       if (isLastAttempt) throw err;
       
       // Exponential backoff
       await new Promise(resolve => setTimeout(resolve, Math.pow(2, attempt) * 1000));
     }
+  }
+}
+
+// Get session statistics
+export async function getSessionStats(sessionId) {
+  try {
+    const stats = await redis.hgetall(`apistats:${sessionId}`);
+    if (!stats || Object.keys(stats).length === 0) {
+      return {
+        total: 0,
+        success: 0,
+        failure: 0,
+        statusCodes: {}
+      };
+    }
+    
+    // Extract status code information
+    const statusCodes = {};
+    Object.entries(stats).forEach(([key, value]) => {
+      if (key.startsWith('status:')) {
+        const code = key.replace('status:', '');
+        statusCodes[code] = parseInt(value);
+      }
+    });
+    
+    return {
+      total: parseInt(stats.total || 0),
+      success: parseInt(stats.success || 0),
+      failure: parseInt(stats.failure || 0),
+      statusCodes
+    };
+  } catch (err) {
+    console.error('Error getting session stats:', err.message);
+    return {
+      total: 0,
+      success: 0,
+      failure: 0,
+      statusCodes: {}
+    };
+  }
+}
+
+// Get API requests for UI table with pagination
+export async function getApiRequestsForTable(sessionId, page = 0, pageSize = 50) {
+  try {
+    // Get total count
+    const total = await redis.zcard(`apirequests:${sessionId}`);
+    
+    // Calculate range for this page
+    const start = page * pageSize;
+    const end = start + pageSize - 1;
+    
+    // Get request IDs for this page (newest first)
+    const reqIds = await redis.zrevrange(`apirequests:${sessionId}`, start, end);
+    
+    if (!reqIds || reqIds.length === 0) {
+      return {
+        total,
+        page,
+        pageSize,
+        data: []
+      };
+    }
+    
+    // Get request data for each ID
+    const requests = [];
+    for (const reqId of reqIds) {
+      const data = await redis.hgetall(`apidata:${sessionId}:${reqId}`);
+      if (data) {
+        // Convert JSON strings back to objects where needed
+        if (data.requestHeaders) data.requestHeaders = JSON.parse(data.requestHeaders);
+        if (data.requestBody) data.requestBody = JSON.parse(data.requestBody);
+        if (data.responseHeaders) data.responseHeaders = JSON.parse(data.responseHeaders);
+        if (data.responseData) data.responseData = JSON.parse(data.responseData);
+        
+        // Convert string numbers to actual numbers
+        data.responseStatus = parseInt(data.responseStatus || 0);
+        data.success = data.success === '1';
+        data.timeMs = parseInt(data.timeMs || 0);
+        
+        // Add the request ID
+        data.id = reqId;
+        
+        requests.push(data);
+      }
+    }
+    
+    return {
+      total,
+      page,
+      pageSize,
+      data: requests
+    };
+  } catch (err) {
+    console.error('Error getting API requests for table:', err.message);
+    return {
+      total: 0,
+      page,
+      pageSize,
+      data: []
+    };
   }
 }
 
@@ -89,7 +322,6 @@ const newWorker = new Worker(
       }
     }
 
-
     return {
       successCount,
       failureCount,
@@ -108,6 +340,12 @@ const newWorker = new Worker(
     }
   }
 );
+
+// Export functions for API routes
+export const apiContextFunctions = {
+  getSessionStats,
+  getApiRequestsForTable
+};
 
 // Enhanced event handlers
 newWorker.on('completed', async (job) => {
