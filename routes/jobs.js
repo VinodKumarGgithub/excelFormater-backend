@@ -27,11 +27,6 @@ router.get('/jobs', async (req, res) => {
         id: job.id,
         name: job.name,
         status,
-        meta: {
-          TransactionId: job.data?.records[0]?.requestId,
-          MemberId: job.data?.records[0]?.memberId,
-          PayerId: job.data?.records[0]?.payerId,
-        },
         progress: job.progress,
         timestamp: job.timestamp,
         finishedOn: job.finishedOn,
@@ -53,7 +48,7 @@ router.get('/jobs', async (req, res) => {
       }
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ jobs:[], pagination: { page: 1, pageSize: 0, total: 0, totalPages: 0 } });
   }
 });
 

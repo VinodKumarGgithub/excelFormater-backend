@@ -51,16 +51,24 @@ router.use(authenticateJWT);
 // GET /api/sessions
 router.get('/sessions', async (req, res) => {
   try {
-    const keys = await redis.keys('logs:*');
-    const sessions = keys.map(key => key.replace('logs:', ''));
+    const keys = await redis.keys('session:*');
+    const sessions = keys.map(key => key.replace('session:', ''));
     const sessionInfo = await Promise.all(
       sessions.map(async (sessionId) => {
+        // Get session details
+        const sessionData = await redis.get(`session:${sessionId}`);
+        const sessionDetails = sessionData ? JSON.parse(sessionData) : {};
+        
+        // Get log count and TTL
         const logCount = await redis.llen(`logs:${sessionId}`);
-        const ttl = await redis.ttl(`logs:${sessionId}`);
+        const ttl = await redis.ttl(`session:${sessionId}`);
+        
         return {
           sessionId,
+          apiUrl: sessionDetails.apiUrl,
           logCount,
-          ttl
+          ttl,
+          createdAt: new Date(parseInt(sessionId.split('').slice(0, 8).join(''), 36) * 1000).toISOString(),
         };
       })
     );
