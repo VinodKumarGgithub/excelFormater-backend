@@ -9,6 +9,7 @@ import redis from './redis.js';
 import cors from 'cors';
 import jobsRouter from './routes/jobs.js';
 import sessionsRouter from './routes/sessions.js';
+import apiContextRouter from './routes/api-context.js';
 
 const app = express();
 const port = 3000;
@@ -27,6 +28,7 @@ app.use(express.json());
 app.use('/admin/queues', serverAdapter.getRouter());
 app.use('/api', sessionsRouter);
 app.use('/api', jobsRouter);
+app.use('/api', apiContextRouter);
 
 app.listen(port, () => {
   console.log(`Server running at http://localhost:${port}`);
