@@ -65,7 +65,7 @@ router.get('/requests/:sessionId/stats', async (req, res) => {
     const { sessionId } = req.params;
     
     // Check if session exists
-    const sessionExists = await redis.exists(sessionId);
+    const sessionExists = await redis.exists(`session:${sessionId}`);
     if (!sessionExists) {
       return res.status(404).json({ error: 'Session not found' });
     }
@@ -102,9 +102,10 @@ router.get('/requests/:sessionId/table', async (req, res) => {
     const pageSize = parseInt(req.query.pageSize) || 50;
     const filterSuccess = req.query.success;
     const filterStatus = req.query.status;
+    const filterRetriable = req.query.retriable === 'true';
     
     // Check if session exists
-    const sessionExists = await redis.exists(sessionId);
+    const sessionExists = await redis.exists(`session:${sessionId}`);
     if (!sessionExists) {
       return res.status(404).json({ error: 'Session not found' });
     }
@@ -113,7 +114,7 @@ router.get('/requests/:sessionId/table', async (req, res) => {
     const result = await apiContextFunctions.getApiRequestsForTable(sessionId, page, pageSize);
     
     // Apply filters if specified
-    if (filterSuccess !== undefined || filterStatus !== undefined) {
+    if (filterSuccess !== undefined || filterStatus !== undefined || filterRetriable) {
       result.data = result.data.filter(item => {
         if (filterSuccess !== undefined) {
           const wantSuccess = filterSuccess === 'true';
@@ -122,6 +123,10 @@ router.get('/requests/:sessionId/table', async (req, res) => {
         
         if (filterStatus !== undefined) {
           if (item.responseStatus !== parseInt(filterStatus)) return false;
+        }
+        
+        if (filterRetriable) {
+          if (!item.canRetry) return false;
         }
         
         return true;
@@ -133,7 +138,8 @@ router.get('/requests/:sessionId/table', async (req, res) => {
       ...result,
       filters: {
         success: filterSuccess,
-        status: filterStatus
+        status: filterStatus,
+        retriable: filterRetriable
       }
     });
   } catch (err) {
@@ -181,12 +187,49 @@ router.get('/requests/:sessionId/:requestId', async (req, res) => {
     
     data.statusText = statusTexts[data.responseStatus] || 'Unknown';
     
+    // Add flag to indicate if this request can be retried (4xx errors)
+    data.canRetry = !data.success && data.responseStatus >= 400 && data.responseStatus < 500;
+    
     res.json({
       id: requestId,
       ...data
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/requests/:sessionId/:requestId/retry - Retry a specific API request with modifications
+router.post('/requests/:sessionId/:requestId/retry', async (req, res) => {
+  try {
+    const { sessionId, requestId } = req.params;
+    const { modifiedRequestBody } = req.body;
+    
+    // Check if the request exists
+    const requestExists = await redis.exists(`apidata:${sessionId}:${requestId}`);
+    if (!requestExists) {
+      return res.status(404).json({ error: 'Original request not found' });
+    }
+    
+    // Retry the request
+    const result = await apiContextFunctions.retryApiRequest(
+      sessionId, 
+      requestId,
+      modifiedRequestBody
+    );
+    
+    res.json({
+      success: true,
+      message: 'API request retried',
+      originalRequestId: requestId,
+      newRequestId: result.newRequestId,
+      result
+    });
+  } catch (err) {
+    res.status(500).json({ 
+      success: false,
+      error: err.message 
+    });
   }
 });
 
