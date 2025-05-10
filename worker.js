@@ -4,21 +4,7 @@ import fs from 'fs/promises';
 import redis from './redis.js';
 import path from 'path';
 import Bottleneck from 'bottleneck';
-import pino from 'pino';
 
-// Configure logger
-const logger = pino({
-  level: process.env.LOG_LEVEL || 'info',
-  transport: {
-    target: 'pino-pretty',
-    options: {
-      colorize: true,
-      translateTime: 'SYS:standard'
-    }
-  }
-});
-
-const LOG_DIR = './logs';
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 
 // Configure rate limiter
@@ -33,55 +19,6 @@ const api = axios.create({
   validateStatus: status => status < 500 // Retry only on 500+ errors
 });
 
-// Create log directory
-try {
-  await fs.mkdir(LOG_DIR, { recursive: true });
-} catch (err) {
-  logger.error({ err }, `Failed to create log directory "${LOG_DIR}"`);
-}
-
-// Map log types to pino log levels
-const LOG_LEVEL_MAP = {
-  'ERROR': 'error',
-  'WARN': 'warn',
-  'INFO': 'info',
-  'START': 'info',
-  'SUCCESS': 'info',
-  'COMPLETE': 'info',
-  'API_REQUEST': 'debug',
-  'API_RESPONSE': 'debug',
-  'API_ERROR': 'error'
-};
-
-// Enhanced logging function with structured logging
-const log = async ({ sessionId, jobId, type, message, meta = {} }) => {
-  const timestamp = new Date().toISOString();
-  const entry = { time: timestamp, jobId, type, message, ...meta };
-  
-  // Log to console with pino using the correct log level
-  const logLevel = LOG_LEVEL_MAP[type] || 'info';
-  logger[logLevel]({ sessionId, ...entry });
-
-  // Store in Redis
-  if (sessionId) {
-    try {
-      await redis.rpush(`logs:${sessionId}`, JSON.stringify(entry));
-      await redis.expire(`logs:${sessionId}`, 86400); // Expire logs after 24 hours
-    } catch (err) {
-      logger.error({ err }, 'Failed to write to Redis');
-    }
-  }
-
-  // Write to file
-  const safeSessionId = sessionId?.replace(/[<>:"/\\|?*\s]/g, '_') || 'general';
-  const logPath = path.join(LOG_DIR, `${safeSessionId}.log`);
-  try {
-    await fs.appendFile(logPath, JSON.stringify(entry) + '\n');
-  } catch (err) {
-    logger.error({ err }, 'Failed to write log file');
-  }
-};
-
 // Process single record with retries
 async function processRecord(record, apiUrl, headers, sessionId, jobId, recordIndex, totalRecords) {
   const maxRetries = 3;
@@ -94,38 +31,11 @@ async function processRecord(record, apiUrl, headers, sessionId, jobId, recordIn
         api.post(apiUrl, record, { headers })
       );
 
-      await log({
-        sessionId,
-        jobId,
-        type: 'SUCCESS',
-        message: `Processed record ${recordIndex + 1}/${totalRecords}`,
-        meta: { 
-          status: response.status,
-          attempt: attempt + 1,
-          recordId: record.id,
-          batchId: record.memberId
-        }
-      });
-
       return response;
     } catch (err) {
       attempt++;
       const isLastAttempt = attempt === maxRetries;
-      const errorMessage = err.response?.headers?.['response-description'] || err.message;
       
-      await log({
-        sessionId,
-        jobId,
-        type: isLastAttempt ? 'ERROR' : 'WARN',
-        message: `Attempt ${attempt}/${maxRetries} failed for record ${recordIndex + 1}`,
-        meta: {
-          error: errorMessage,
-          payload: record,
-          status: err.response?.status,
-          willRetry: !isLastAttempt
-        }
-      });
-
       if (isLastAttempt) throw err;
       
       // Exponential backoff
@@ -159,14 +69,6 @@ const newWorker = new Worker(
       'X-User-Id': auth.userId,
     };
 
-    await log({
-      sessionId,
-      jobId,
-      type: 'START',
-      message: `Processing batch of ${records.length} records`,
-      meta: { totalRecords: records.length }
-    });
-
     // Process records with progress tracking
     for (let i = 0; i < records.length; i++) {
       try {
@@ -187,13 +89,6 @@ const newWorker = new Worker(
       }
     }
 
-    // Store job metrics
-    await redis.hset(`metrics:${jobId}`, {
-      successCount,
-      failureCount,
-      totalRecords: records.length,
-      completedAt: new Date().toISOString()
-    });
 
     return {
       successCount,
@@ -217,32 +112,9 @@ const newWorker = new Worker(
 // Enhanced event handlers
 newWorker.on('completed', async (job) => {
   const { successCount, failureCount, totalRecords } = job.returnvalue;
-  logger.info({
-    jobId: job.id,
-    successCount,
-    failureCount,
-    totalRecords
-  }, 'Job completed');
 });
-
-newWorker.on('failed', async (job, err) => {
-  logger.error({
-    jobId: job.id,
-    error: err.message,
-    stack: err.stack
-  }, 'Job failed');
-});
-
-newWorker.on('progress', (job, progress) => {
-  logger.info({
-    jobId: job.id,
-    ...progress
-  }, 'Job progress update');
-});
-
 // Graceful shutdown
 process.on('SIGTERM', async () => {
-  logger.info('Shutting down worker...');
   await newWorker.close();
   process.exit(0);
 });
