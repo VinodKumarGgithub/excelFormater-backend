@@ -52,6 +52,17 @@ router.get('/jobs', async (req, res) => {
   }
 });
 
+// GET /api/jobs/status-counts
+router.get('/jobs/status-counts', async (req, res) => {
+  try {
+    const counts = await batchQueue.getJobCounts('completed', 'waiting', 'active', 'failed', 'delayed');
+    const total = Object.values(counts).reduce((sum, val) => sum + val, 0);
+    res.json({  total, ...counts });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // POST /api/job/:jobId/pause
 router.post('/job/:jobId/pause', async (req, res) => {
   try {
