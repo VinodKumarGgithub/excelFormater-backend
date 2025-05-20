@@ -1,7 +1,7 @@
 import { Worker, Job } from 'bullmq';
 import axios from 'axios';
 import fs from 'fs/promises';
-import redis from './redis.js';
+import redis from './lib/redis.js';
 import path from 'path';
 import Bottleneck from 'bottleneck';
 
@@ -23,7 +23,7 @@ const api = axios.create({
 async function trackApiCall(sessionId, requestData, responseData) {
   try {
     // Generate unique ID using timestamp and random value
-    const reqId = `${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
+    const reqId = requestData.requestId || `random-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
 
     // Determine if the response should be considered a failure based on status code
     // Consider any 4xx or 5xx response as a failure
@@ -406,7 +406,7 @@ export async function retryApiRequest(sessionId, requestId, modifiedRequestBody)
 const newWorker = new Worker(
   'batchQueue',
   async (job) => {
-    const { sessionId, records, verbose = false } = job.data;
+    const { sessionId, records } = job.data;
     const jobId = job.id;
     let successCount = 0;
     let failureCount = 0;
