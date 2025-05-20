@@ -1,5 +1,5 @@
 import express from 'express';
-import redis from '../redis.js';
+import redis from '../lib/redis.js';
 import { authenticateJWT } from './sessions.js';
 import { apiContextFunctions } from '../worker.js';
 
