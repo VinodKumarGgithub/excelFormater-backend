@@ -4,7 +4,7 @@ import fs from 'fs/promises';
 import redis from './lib/redis.js';
 import path from 'path';
 import Bottleneck from 'bottleneck';
-
+import { redisKeys } from './lib/redis/redisKeys.js';
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 
 // Configure rate limiter
@@ -20,7 +20,7 @@ const api = axios.create({
 });
 
 // Save API request/response data and update session statistics
-async function trackApiCall(sessionId, requestData, responseData) {
+async function trackApiCall(sessionId, requestData, responseData, isRetry = false) {
   try {
     // Generate unique ID using timestamp and random value
     const reqId = requestData.requestId || `random-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
@@ -36,8 +36,7 @@ async function trackApiCall(sessionId, requestData, responseData) {
     }
 
     // Store request/response in Redis hash (efficient for large number of fields)
-    // Key format: apidata:{sessionId}:{reqId}
-    const key = `apidata:${sessionId}:${reqId}`;
+    const key = redisKeys.apiData(sessionId, reqId);
     const dataToStore = {
       timestamp: new Date().toISOString(),
       requestUrl: requestData.url,
@@ -57,24 +56,29 @@ async function trackApiCall(sessionId, requestData, responseData) {
     
     // Store this request ID in a sorted set by timestamp for easy retrieval
     // Using timestamp as score for chronological sorting
-    await redis.zadd(`apirequests:${sessionId}`, Date.now(), reqId);
+    await redis.zadd(redisKeys.apiRequests(sessionId), Date.now(), reqId);
     
     // Update session-level statistics
     const pipeline = redis.pipeline();
     
     // Increment total request count
-    pipeline.hincrby(`apistats:${sessionId}`, 'total', 1);
+    if(!isRetry) {
+      pipeline.hincrby(redisKeys.apiStats(sessionId), 'total', 1);
+    }
     
     // Increment success or failure count
-    if (responseData.success) {
-      pipeline.hincrby(`apistats:${sessionId}`, 'success', 1);
+    if (isRetry && responseData.success) {
+      pipeline.hincrby(redisKeys.apiStats(sessionId), 'success', 1);
+      pipeline.hincrby(redisKeys.apiStats(sessionId), 'failure', -1);
+    } else if(responseData.success) {
+      pipeline.hincrby(redisKeys.apiStats(sessionId), 'success', 1);
     } else {
-      pipeline.hincrby(`apistats:${sessionId}`, 'failure', 1);
+      pipeline.hincrby(redisKeys.apiStats(sessionId), 'failure', 1);
     }
     
     // Track status code distribution
     if (statusCode) {
-      pipeline.hincrby(`apistats:${sessionId}`, `status:${statusCode}`, 1);
+      pipeline.hincrby(redisKeys.apiStats(sessionId), `status:${statusCode}`, 1);
     }
     
     // Execute all updates atomically
@@ -134,9 +138,9 @@ async function processRecord(record, apiUrl, headers, sessionId, jobId, recordIn
         };
       }
       
-      // Track this API call
-      await trackApiCall(sessionId, requestData, responseData);
-      
+      // Track Sucess API call
+      await trackApiCall(sessionId, requestData, responseData, attempt !== 0);
+
       // Only retry on 5xx errors (server errors)
       if (response.status >= 500 && attempt < maxRetries - 1) {
         attempt++;
@@ -166,7 +170,7 @@ async function processRecord(record, apiUrl, headers, sessionId, jobId, recordIn
       };
       
       // Track this failed API call
-      await trackApiCall(sessionId, requestData, errorData);
+      await trackApiCall(sessionId, requestData, errorData, attempt !== 0);
       
       if (isLastAttempt) throw err;
       
@@ -179,8 +183,8 @@ async function processRecord(record, apiUrl, headers, sessionId, jobId, recordIn
 // Get session statistics
 export async function getSessionStats(sessionId) {
   try {
-    sessionId = `session:${sessionId}`;
-    const stats = await redis.hgetall(`apistats:${sessionId}`);
+    sessionId = redisKeys.sessionConfig(sessionId);
+    const stats = await redis.hgetall(redisKeys.apiStats(sessionId));
     if (!stats || Object.keys(stats).length === 0) {
       return {
         total: 0,
@@ -219,16 +223,16 @@ export async function getSessionStats(sessionId) {
 // Get API requests for UI table with pagination
 export async function getApiRequestsForTable(sessionId, page = 0, pageSize = 50) {
   try {
-    sessionId = `session:${sessionId}`;
+    sessionId = redisKeys.sessionConfig(sessionId);
     // Get total count
-    const total = await redis.zcard(`apirequests:${sessionId}`);
+    const total = await redis.zcard(redisKeys.apiRequests(sessionId));
     
     // Calculate range for this page
     const start = page * pageSize;
     const end = start + pageSize - 1;
     
     // Get request IDs for this page (newest first)
-    const reqIds = await redis.zrevrange(`apirequests:${sessionId}`, start, end);
+    const reqIds = await redis.zrevrange(redisKeys.apiRequests(sessionId), start, end);
     
     if (!reqIds || reqIds.length === 0) {
       return {
@@ -242,7 +246,7 @@ export async function getApiRequestsForTable(sessionId, page = 0, pageSize = 50)
     // Get request data for each ID
     const requests = [];
     for (const reqId of reqIds) {
-      const data = await redis.hgetall(`apidata:${sessionId}:${reqId}`);
+      const data = await redis.hgetall(redisKeys.apiData(sessionId, reqId));
       if (data) {
         // Convert JSON strings back to objects where needed
         if (data.requestHeaders) data.requestHeaders = JSON.parse(data.requestHeaders);
@@ -286,7 +290,7 @@ export async function getApiRequestsForTable(sessionId, page = 0, pageSize = 50)
 export async function retryApiRequest(sessionId, requestId, modifiedRequestBody) {
   try {
     // Get the original request data
-    const requestData = await redis.hgetall(`apidata:${sessionId}:${requestId}`);
+    const requestData = await redis.hgetall(redisKeys.apiData(sessionId, requestId));
     if (!requestData) {
       throw new Error('Original request not found');
     }
@@ -348,7 +352,7 @@ export async function retryApiRequest(sessionId, requestId, modifiedRequestBody)
         headers: originalHeaders,
         body: originalBody,
         ...retryContext
-      }, responseData);
+      }, responseData, true);
       
       return {
         success: true,
