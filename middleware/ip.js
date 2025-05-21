@@ -2,6 +2,10 @@ const allowedIPs = process.env.ALLOWED_IPS?.split(',') || ['127.0.0.1', '::1', '
 
 export const checkIP = (req, res, next) => {
   // const ip = req.ip || req.connection.remoteAddress;
+  // if admin/queues, skip ip check
+  if (req.path.startsWith('/admin/queues')) {
+    return next();
+  }
   const ip = req.headers['x-client-ip'] || req.ip;
   if (allowedIPs?.includes(ip)) {
     return next();
