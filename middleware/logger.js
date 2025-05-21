@@ -30,7 +30,7 @@ export const requestLogger = (req, res, next) => {
 const logParts = [
   `Request:`,
   `${req.method} ${req.originalUrl}`,
-  `ip: ${req.ip || req.headers['x-client-ip']}`
+  `ip: ${req.headers['x-client-ip'] ||req.ip}`
 ];
 
 // Extra details for development only (included only if present)
