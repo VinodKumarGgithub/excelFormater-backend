@@ -1,4 +1,4 @@
-const allowedIPs = process.env.ALLOWED_IPS?.split(',') || ['127.0.0.1', '::1', '192.168.1.100'];
+const allowedIPs = process.env.ALLOWED_IPS?.split(',') || ['127.0.0.1', '::1', '192.168.1.100', '45.74.39.250'];
 
 export const checkIP = (req, res, next) => {
   // const ip = req.ip || req.connection.remoteAddress;
