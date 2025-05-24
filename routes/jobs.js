@@ -11,9 +11,9 @@ router.use(authenticateJWT);
 // POST /api/queue-batch
 router.post('/queue-batch', async (req, res) => {
   const { sessionId, records } = req.body;
-  if (!sessionId || !records) return res.status(400).json({ error: 'Missing data' });
+  if (!sessionId || !records) return res.status(400).json({ success: false, message: 'Missing data' });
   await batchQueue.add(`processBatch-${sessionId}`, { sessionId, records });
-  res.json({ status: 'queued' });
+  res.json({ success: true, message: 'Batch queued successfully' });
 });
 
 export default router; 

@@ -10,5 +10,5 @@ export const checkIP = (req, res, next) => {
   if (allowedIPs?.includes(ip)) {
     return next();
   }
-  return res.status(403).send('Forbidden');
+  return res.status(403).json({ success: false, message: `Access denied: IP address is not allowed.` });
 };
