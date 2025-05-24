@@ -1,8 +1,7 @@
 import express from 'express';
 import redis from '../lib/redis.js';
 import jwt from 'jsonwebtoken';
-import { DEMO_USERS } from '../lib/demousers.js';
-
+import { getDemoUser } from '../lib/demousers.js';
 const router = express.Router();
 
 const JWT_SECRET = process.env.JWT_SECRET || 'sd@!v@#$%^&*()_+';
@@ -13,19 +12,21 @@ export function authenticateJWT(req, res, next) {
   if (authHeader && authHeader.startsWith('Bearer ')) {
     const token = authHeader.split(' ')[1];
     jwt.verify(token, JWT_SECRET, (err, user) => {
-      if (err) return res.status(401).json({ error: 'Invalid token' });
+      if (err) return res.status(401).json({ success: false, message: 'Invalid token' });
       req.user = user;
       next();
     });
   } else {
-    res.status(401).json({ error: 'No token provided' });
+    res.status(401).json({ success: false, message: 'No token provided' });
   }
 }
 
 // POST /api/login
 router.post('/login', (req, res) => {
   const { username, password } = req.body;
-  const user = DEMO_USERS.find(user => user.username === username && user.password === password);
+  try{
+
+  const user = getDemoUser(username, password);
   if (user) {
     const token = jwt.sign({ userId: user.userId, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
     return res.json({
@@ -34,7 +35,10 @@ router.post('/login', (req, res) => {
       message: 'Login successful'
     });
   }
-  res.status(401).json({ error: 'Invalid credentials' });
+  res.status(401).json({ success: false, message: 'Invalid credentials' });
+  } catch (error) {
+    res.status(401).json({ success: false, message: error.message });
+  }
 });
 
 // Protect all routes below this line
@@ -65,7 +69,7 @@ router.get('/sessions', async (req, res) => {
       sessionIds = keys.map(key => key.replace('session:', ''));
     } else {
       if (!userId) {
-        return res.status(400).json({ error: 'Missing userId' });
+        return res.status(400).json({ success: false, message: 'Missing userId' });
       }
       // Non-admin: get sessions from user's list
       sessionIds = await redis.lrange(`user:sessions:${userId}`, 0, -1);
@@ -93,7 +97,7 @@ router.get('/sessions', async (req, res) => {
 
     res.json(sessionInfo);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ success: false, message: 'Oops! Something went wrong, Contact Support at support@example.com' });
   }
 });
 
