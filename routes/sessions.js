@@ -1,11 +1,11 @@
 import express from 'express';
 import redis from '../lib/redis.js';
 import jwt from 'jsonwebtoken';
+import { DEMO_USERS } from '../lib/demousers.js';
 
 const router = express.Router();
 
 const JWT_SECRET = process.env.JWT_SECRET || 'sd@!v@#$%^&*()_+';
-const DEMO_USER = { username: 'admin', password: 'password123', role: 'admin', userId: '864616516-dfsd-564' };
 
 // JWT authentication middleware
 export function authenticateJWT(req, res, next) {
@@ -25,11 +25,12 @@ export function authenticateJWT(req, res, next) {
 // POST /api/login
 router.post('/login', (req, res) => {
   const { username, password } = req.body;
-  if (username === DEMO_USER.username && password === DEMO_USER.password) {
-    const token = jwt.sign({ username }, JWT_SECRET, { expiresIn: '7d' });
+  const user = DEMO_USERS.find(user => user.username === username && user.password === password);
+  if (user) {
+    const token = jwt.sign({ userId: user.userId, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
     return res.json({
       token,
-      user: { username, role: DEMO_USER.role, userId: DEMO_USER.userId },
+      user: { username },
       message: 'Login successful'
     });
   }
@@ -47,7 +48,7 @@ router.post('/init-session', async (req, res) => {
 
   await redis.set(sessionId, JSON.stringify({ apiUrl, auth })); // no expiration
   // Push sessionId to user session list
-  await redis.lpush(`user:sessions:${req.user.username}`, sessionId);
+  await redis.lpush(`user:sessions:${req.user.userId}`, sessionId);
   res.json({ sessionId });
 });
 
