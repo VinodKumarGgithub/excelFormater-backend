@@ -59,10 +59,21 @@ async function trackApiCall(sessionId, requestData, responseData, isRetry = fals
     await redis.zadd(redisKeys.apiRequests(sessionId), Date.now(), reqId);
     
     // Update session-level statistics
+    // Track time series data for charting (success/failure, latency)
+    const chartKeyPrefix = redisKeys.apiChart(sessionId); // e.g. api:chart:<sessionId>
+
+    // Round timestamp to minute (or hour for broader buckets)
+    const roundedTime = new Date(Math.floor(Date.now() / (60 * 1000)) * (60 * 1000)).toISOString();
+
+    // Prepare pipeline to increment chart data counters
     const pipeline = redis.pipeline();
-    
+    pipeline.hincrby(`${chartKeyPrefix}:latency:${roundedTime}`, 'count', 1);
+    pipeline.hincrbyfloat(`${chartKeyPrefix}:latency:${roundedTime}`, 'totalTimeMs', responseData.timeMs || 0);
+        
+        
     // Increment total request count
     if(!isRetry) {
+      pipeline.hincrby(`${chartKeyPrefix}:requests:${roundedTime}`, 'total', 1);
       pipeline.hincrby(redisKeys.apiStats(sessionId), 'total', 1);
     }
     
@@ -70,14 +81,19 @@ async function trackApiCall(sessionId, requestData, responseData, isRetry = fals
     if (isRetry && responseData.success) {
       pipeline.hincrby(redisKeys.apiStats(sessionId), 'success', 1);
       pipeline.hincrby(redisKeys.apiStats(sessionId), 'failure', -1);
+      pipeline.hincrby(`${chartKeyPrefix}:requests:${roundedTime}`, 'success' , 1);
+      pipeline.hincrby(`${chartKeyPrefix}:requests:${roundedTime}`, 'failure', -1);
     } else if(responseData.success) {
       pipeline.hincrby(redisKeys.apiStats(sessionId), 'success', 1);
-    } else {
+      pipeline.hincrby(`${chartKeyPrefix}:requests:${roundedTime}`, 'success' , 1);
+    } else if(!isRetry && !responseData.success) {
       pipeline.hincrby(redisKeys.apiStats(sessionId), 'failure', 1);
+      pipeline.hincrby(`${chartKeyPrefix}:requests:${roundedTime}`, 'failure', 1);
     }
     
     // Track status code distribution
     if (statusCode) {
+      pipeline.hincrby(`${chartKeyPrefix}:status:${roundedTime}`, `${statusCode}`, 1);
       pipeline.hincrby(redisKeys.apiStats(sessionId), `status:${statusCode}`, 1);
     }
     
@@ -388,7 +404,7 @@ export async function retryApiRequest(sessionId, requestId, modifiedRequestBody)
         headers: originalHeaders,
         body: originalBody,
         ...retryContext
-      }, errorData);
+      }, errorData, true);
       
       return {
         success: false,

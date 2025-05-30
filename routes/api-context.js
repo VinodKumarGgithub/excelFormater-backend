@@ -202,8 +202,9 @@ router.get('/requests/:sessionId/:requestId', async (req, res) => {
 // POST /api/requests/:sessionId/:requestId/retry - Retry a specific API request with modifications
 router.post('/requests/:sessionId/:requestId/retry', async (req, res) => {
   try {
-    const { sessionId, requestId } = req.params;
+    let { sessionId, requestId } = req.params;
     const { modifiedRequestBody } = req.body;
+    sessionId = `session:${sessionId}`;
     
     // Check if the request exists
     const requestExists = await redis.exists(`apidata:${sessionId}:${requestId}`);
@@ -230,6 +231,47 @@ router.post('/requests/:sessionId/:requestId/retry', async (req, res) => {
       success: false,
       error: err.message 
     });
+  }
+});
+
+router.get('/chart-data/:sessionId', async (req, res) => {
+  const { sessionId } = req.params;
+
+  try {
+    // Pattern to match: api:chart:<sessionId>:*
+    const pattern = `api:chart:session:${sessionId}:*`;
+
+    // Use SCAN instead of KEYS in production for large datasets
+    let cursor = '0';
+    let keys = [];
+    do {
+      const [nextCursor, foundKeys] = await redis.scan(cursor, 'MATCH', pattern, 'COUNT', 100);
+      cursor = nextCursor;
+      keys = keys.concat(foundKeys);
+    } while (cursor !== '0');
+
+    // Sort keys chronologically
+    keys.sort();
+
+    const pipeline = redis.pipeline();
+    keys.forEach((key) => pipeline.hgetall(key));
+    const results = await pipeline.exec();
+
+    const chartData = keys.map((key, index) => {
+      const time = key.split(':').pop(); // last segment is the hour key
+      const data = results[index][1];
+      return {
+        time, // e.g., "2025-05-30T10"
+        success: parseInt(data.success || '0', 10),
+        failure: parseInt(data.failure || '0', 10),
+      };
+    });
+
+    res.json({ success: true, message: 'chart data found', sessionId, chartData });
+
+  } catch (err) {
+    console.error('Error fetching chart data:', err);
+    res.status(500).json({ success:false, error: 'Failed to fetch chart data' });
   }
 });
 
