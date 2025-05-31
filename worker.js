@@ -3,15 +3,8 @@ import axios from 'axios';
 import fs from 'fs/promises';
 import redis from './lib/redis.js';
 import path from 'path';
-import Bottleneck from 'bottleneck';
 import { redisKeys } from './lib/redis/redisKeys.js';
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
-
-// Configure rate limiter
-const limiter = new Bottleneck({
-  maxConcurrent: 5,
-  minTime: 100 // Minimum time between requests
-});
 
 // Configure axios instance with defaults
 const api = axios.create({
@@ -40,7 +33,7 @@ async function trackApiCall(sessionId, requestData, responseData, isRetry = fals
     const dataToStore = {
       timestamp: new Date().toISOString(),
       requestUrl: requestData.url,
-      requestMethod: 'POST',
+      requestMethod: requestData.method,
       requestHeaders: JSON.stringify(requestData.headers),
       requestBody: JSON.stringify(requestData.body),
       responseStatus: statusCode,
@@ -109,13 +102,43 @@ async function trackApiCall(sessionId, requestData, responseData, isRetry = fals
 }
 
 // Process single record with retries
-async function processRecord(record, apiUrl, headers, sessionId, jobId, recordIndex, totalRecords) {
+async function processRecord(record, apiUrl, auth, sessionId, jobId, recordIndex, totalRecords) {
   const maxRetries = 3;
   let attempt = 0;
+
+  // Prepare headers based on auth type
+  const headers = {};
+  
+  switch (auth.type) {
+    case 'apiKey':
+      if (auth.keyLocation === 'header') {
+        headers[auth.keyName || 'X-API-Key'] = auth.apiKey;
+      } else if (auth.keyLocation === 'query') {
+        // Add API key to URL as query parameter
+        const url = new URL(apiUrl);
+        url.searchParams.append(auth.keyName || 'apiKey', auth.apiKey);
+        apiUrl = url.toString();
+      }
+      break;
+      
+    case 'basic':
+      headers.Authorization = `Basic ${Buffer.from(`${auth.username}:${auth.password}`).toString('base64')}`;
+      break;
+      
+    case 'bearerToken':
+      headers.Authorization = `Bearer ${auth.token}`;
+      break;
+      
+    case 'none':
+    default:
+      // No authentication headers needed
+      break;
+  }
 
   // Prepare request data
   const requestData = {
     url: apiUrl,
+    method: auth.method || 'POST', // Default to POST if not specified
     headers,
     body: record,
     sessionId,
@@ -127,10 +150,39 @@ async function processRecord(record, apiUrl, headers, sessionId, jobId, recordIn
     const startTime = Date.now();
     
     try {
-      // Use rate limiter for API calls
-      const response = await limiter.schedule(() => 
-        api.post(apiUrl, record, { headers })
-      );
+      let response;
+      // Make API call based on HTTP method
+      switch (requestData.method.toUpperCase()) {
+        case 'GET':
+          response = await api.get(apiUrl, { 
+            headers,
+            params: record // For GET requests, send data as query params
+          });
+          break;
+        case 'POST':
+          response = await api.post(apiUrl, record, { headers });
+          break;
+        case 'PUT':
+          response = await api.put(apiUrl, record, { headers });
+          break;
+        case 'PATCH':
+          response = await api.patch(apiUrl, record, { headers });
+          break;
+        case 'DELETE':
+          response = await api.delete(apiUrl, { 
+            headers,
+            data: record // For DELETE requests, send data in body
+          });
+          break;
+        case 'HEAD':
+          response = await api.head(apiUrl, { headers });
+          break;
+        case 'OPTIONS':
+          response = await api.options(apiUrl, { headers });
+          break;
+        default:
+          throw new Error(`Unsupported HTTP method: ${requestData.method}`);
+      }
       
       // Check if this is a 4xx or 5xx response
       const isHttpError = response.status >= 400;
@@ -154,7 +206,7 @@ async function processRecord(record, apiUrl, headers, sessionId, jobId, recordIn
         };
       }
       
-      // Track Sucess API call
+      // Track Success API call
       await trackApiCall(sessionId, requestData, responseData, attempt !== 0);
 
       // Only retry on 5xx errors (server errors)
@@ -441,16 +493,12 @@ const newWorker = new Worker(
       throw new Error(`No config found for sessionId: ${sessionId}`);
     }
 
-    const { apiUrl, auth } = JSON.parse(configJson);
-    const headers = {
-      Authorization: `Basic ${Buffer.from(`${auth.userId}:${auth.apiKey}`).toString('base64')}`,
-      'X-User-Id': auth.userId,
-    };
-
+    const { apiUrl, auth, method } = JSON.parse(configJson);
+    
     // Process records with progress tracking
     for (let i = 0; i < records.length; i++) {
       try {
-        await processRecord(records[i], apiUrl, headers, sessionId, jobId, i, records.length);
+        await processRecord(records[i], apiUrl, { ...auth, method }, sessionId, jobId, i, records.length);
         successCount++;
       } catch (err) {
         failureCount++;

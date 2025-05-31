@@ -116,11 +116,11 @@ router.use(authenticateJWT);
 
 // POST /api/init-session
 router.post('/init-session', async (req, res) => {
-  const { apiUrl, auth } = req.body;
-  if (!apiUrl || !auth) return res.status(400).json({ error: 'Missing data' });
+  const { apiUrl, auth, method } = req.body;
+  if (!apiUrl || !auth || !method) return res.status(400).json({ error: 'Missing data' });
   const sessionId = 'session:' + Date.now().toString(36) + Math.random().toString(36).substr(2, 6);
 
-  await redis.set(sessionId, JSON.stringify({ apiUrl, auth })); // no expiration
+  await redis.set(sessionId, JSON.stringify({ apiUrl, auth, method })); // no expiration
   // Push sessionId to user session list
   await redis.lpush(`user:sessions:${req.user.userId}`, sessionId);
   res.json({ sessionId });
