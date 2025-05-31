@@ -15,6 +15,7 @@ import apiContextRouter from './routes/api-context.js';
 import { requestLogger, errorLogger } from './middleware/logger.js';
 import { globalErrorHandler } from './middleware/error.js';
 import systemHealthRouter from './routes/systemHealth.js';
+import adminRouter from './routes/admin.js';
 
 const app = express();
 const batchQueue = new Queue('batchQueue', { connection: redis });
@@ -41,6 +42,7 @@ app.use('/api', sessionsRouter);
 app.use('/api', jobsRouter);
 app.use('/api', apiContextRouter);
 app.use('/api', systemHealthRouter);
+app.use('/api/admin', adminRouter);
 
 // Error handling middleware
 app.use(globalErrorHandler);
