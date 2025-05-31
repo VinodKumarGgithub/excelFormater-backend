@@ -494,7 +494,7 @@ const newWorker = new Worker(
     }
 
     const { apiUrl, auth, method } = JSON.parse(configJson);
-    
+
     // Process records with progress tracking
     for (let i = 0; i < records.length; i++) {
       try {
@@ -522,11 +522,7 @@ const newWorker = new Worker(
     };
   },
   {
-    concurrency: 20,
-    limiter: {
-      max: 1000,
-      duration: 5000
-    },
+    concurrency: 10, // Strictly limit to 10 concurrent jobs
     settings: {
       retryProcessDelay: 5000,
       backoffDelay: 5000
