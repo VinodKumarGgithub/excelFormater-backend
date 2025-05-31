@@ -58,40 +58,48 @@ async function trackApiCall(sessionId, requestData, responseData, isRetry = fals
     // Round timestamp to minute (or hour for broader buckets)
     const roundedTime = new Date(Math.floor(Date.now() / (60 * 1000)) * (60 * 1000)).toISOString();
 
-    // Prepare pipeline to increment chart data counters
-    const pipeline = redis.pipeline();
-    pipeline.hincrby(`${chartKeyPrefix}:latency:${roundedTime}`, 'count', 1);
-    pipeline.hincrbyfloat(`${chartKeyPrefix}:latency:${roundedTime}`, 'totalTimeMs', responseData.timeMs || 0);
-        
-        
-    // Increment total request count
-    if(!isRetry) {
-      pipeline.hincrby(`${chartKeyPrefix}:requests:${roundedTime}`, 'total', 1);
-      pipeline.hincrby(redisKeys.apiStats(sessionId), 'total', 1);
-    }
+    // Use Redis transaction to ensure atomic operations
+    const multi = redis.multi();
+
+    // Track latency data
+    multi.hincrby(`${chartKeyPrefix}:latency:${roundedTime}`, 'count', 1);
+    multi.hincrbyfloat(`${chartKeyPrefix}:latency:${roundedTime}`, 'totalTimeMs', responseData.timeMs || 0);
     
-    // Increment success or failure count
-    if (isRetry && responseData.success) {
-      pipeline.hincrby(redisKeys.apiStats(sessionId), 'success', 1);
-      pipeline.hincrby(redisKeys.apiStats(sessionId), 'failure', -1);
-      pipeline.hincrby(`${chartKeyPrefix}:requests:${roundedTime}`, 'success' , 1);
-      pipeline.hincrby(`${chartKeyPrefix}:requests:${roundedTime}`, 'failure', -1);
-    } else if(responseData.success) {
-      pipeline.hincrby(redisKeys.apiStats(sessionId), 'success', 1);
-      pipeline.hincrby(`${chartKeyPrefix}:requests:${roundedTime}`, 'success' , 1);
-    } else if(!isRetry && !responseData.success) {
-      pipeline.hincrby(redisKeys.apiStats(sessionId), 'failure', 1);
-      pipeline.hincrby(`${chartKeyPrefix}:requests:${roundedTime}`, 'failure', 1);
+    // Track request counts
+    if (!isRetry) {
+      // Only increment total for new requests, not retries
+      multi.hincrby(`${chartKeyPrefix}:requests:${roundedTime}`, 'total', 1);
+      multi.hincrby(redisKeys.apiStats(sessionId), 'total', 1);
+    }
+
+    // Handle success/failure counts
+    if (isRetry) {
+      if (responseData.success) {
+        // For successful retries, increment success and decrement failure
+        multi.hincrby(redisKeys.apiStats(sessionId), 'success', 1);
+        multi.hincrby(redisKeys.apiStats(sessionId), 'failure', -1);
+        multi.hincrby(`${chartKeyPrefix}:requests:${roundedTime}`, 'success', 1);
+        multi.hincrby(`${chartKeyPrefix}:requests:${roundedTime}`, 'failure', -1);
+      }
+    } else {
+      // For new requests
+      if (responseData.success) {
+        multi.hincrby(redisKeys.apiStats(sessionId), 'success', 1);
+        multi.hincrby(`${chartKeyPrefix}:requests:${roundedTime}`, 'success', 1);
+      } else {
+        multi.hincrby(redisKeys.apiStats(sessionId), 'failure', 1);
+        multi.hincrby(`${chartKeyPrefix}:requests:${roundedTime}`, 'failure', 1);
+      }
     }
     
     // Track status code distribution
     if (statusCode) {
-      pipeline.hincrby(`${chartKeyPrefix}:status:${roundedTime}`, `${statusCode}`, 1);
-      pipeline.hincrby(redisKeys.apiStats(sessionId), `status:${statusCode}`, 1);
+      multi.hincrby(`${chartKeyPrefix}:status:${roundedTime}`, `${statusCode}`, 1);
+      multi.hincrby(redisKeys.apiStats(sessionId), `status:${statusCode}`, 1);
     }
     
     // Execute all updates atomically
-    await pipeline.exec();
+    await multi.exec();
     
     return reqId;
   } catch (err) {
@@ -105,6 +113,7 @@ async function trackApiCall(sessionId, requestData, responseData, isRetry = fals
 async function processRecord(record, apiUrl, auth, sessionId, jobId, recordIndex, totalRecords) {
   const maxRetries = 3;
   let attempt = 0;
+  let lastError = null;
 
   // Prepare headers based on auth type
   const headers = {};
@@ -220,6 +229,7 @@ async function processRecord(record, apiUrl, auth, sessionId, jobId, recordIndex
       return response;
     } catch (err) {
       attempt++;
+      lastError = err;
       const isLastAttempt = attempt === maxRetries;
       
       // Prepare error response data
@@ -240,7 +250,7 @@ async function processRecord(record, apiUrl, auth, sessionId, jobId, recordIndex
       // Track this failed API call
       await trackApiCall(sessionId, requestData, errorData, attempt !== 0);
       
-      if (isLastAttempt) throw err;
+      if (isLastAttempt) throw lastError;
       
       // Exponential backoff
       await new Promise(resolve => setTimeout(resolve, Math.pow(2, attempt) * 1000));
@@ -495,13 +505,14 @@ const newWorker = new Worker(
 
     const { apiUrl, auth, method } = JSON.parse(configJson);
 
-    // Process records with progress tracking
+    // Process records sequentially within each job
     for (let i = 0; i < records.length; i++) {
       try {
         await processRecord(records[i], apiUrl, { ...auth, method }, sessionId, jobId, i, records.length);
         successCount++;
       } catch (err) {
         failureCount++;
+        console.error(`Error processing record ${i}:`, err.message);
       }
 
       // Update progress
@@ -525,7 +536,10 @@ const newWorker = new Worker(
     concurrency: 10, // Strictly limit to 10 concurrent jobs
     settings: {
       retryProcessDelay: 5000,
-      backoffDelay: 5000
+      backoffDelay: 5000,
+      lockDuration: 30000, // Lock duration for each job
+      stalledInterval: 30000, // Check for stalled jobs every 30 seconds
+      maxStalledCount: 2 // Maximum number of times a job can be marked as stalled
     }
   }
 );
@@ -540,7 +554,17 @@ export const apiContextFunctions = {
 // Enhanced event handlers
 newWorker.on('completed', async (job) => {
   const { successCount, failureCount, totalRecords } = job.returnvalue;
+  console.log(`Job ${job.id} completed. Success: ${successCount}, Failure: ${failureCount}, Total: ${totalRecords}`);
 });
+
+newWorker.on('failed', async (job, err) => {
+  console.error(`Job ${job.id} failed:`, err.message);
+});
+
+newWorker.on('stalled', async (job) => {
+  console.warn(`Job ${job.id} stalled`);
+});
+
 // Graceful shutdown
 process.on('SIGTERM', async () => {
   await newWorker.close();
