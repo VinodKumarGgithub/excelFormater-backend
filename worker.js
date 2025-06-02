@@ -536,10 +536,11 @@ const newWorker = new Worker(
     concurrency: 10, // Strictly limit to 10 concurrent jobs
     settings: {
       retryProcessDelay: 5000,
-      backoffDelay: 5000,
-      lockDuration: 30000, // Lock duration for each job
-      stalledInterval: 30000, // Check for stalled jobs every 30 seconds
-      maxStalledCount: 2 // Maximum number of times a job can be marked as stalled
+      backoffDelay: 5000
+    },
+    limiter: {
+      max: 1000,
+      duration: 5000
     }
   }
 );
