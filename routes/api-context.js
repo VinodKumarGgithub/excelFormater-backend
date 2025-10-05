@@ -1,7 +1,7 @@
 import express from 'express';
 import redis from '../lib/redis.js';
 import { authenticateJWT } from './sessions.js';
-import { apiContextFunctions } from '../worker.js';
+import { apiContextFunctions } from '../services/api-context.js';
 import { redisKeys } from '../lib/redis/redisKeys.js';
 
 const router = express.Router();
