@@ -1,18 +1,17 @@
 import { Worker, Job } from 'bullmq';
 import axios from 'axios';
-import fs from 'fs/promises';
+import { format } from 'date-fns';
 import redis from './lib/redis.js';
-import path from 'path';
 import { redisKeys } from './lib/redis/redisKeys.js';
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 
 // Configure axios instance with defaults
 const api = axios.create({
-  timeout: 10000,
-  validateStatus: status => status < 500 // Retry only on 500+ errors
+  timeout: 30000,
+  validateStatus: status => status < 300 // Retry only on 500+ errors
 });
 
-// Save API request/response data and update session statistics
+// Save API request/response data and update session statistics using HyperLogLog
 async function trackApiCall(sessionId, requestData, responseData, isRetry = false) {
   try {
     // Generate unique ID using timestamp and random value
@@ -50,57 +49,7 @@ async function trackApiCall(sessionId, requestData, responseData, isRetry = fals
     // Store this request ID in a sorted set by timestamp for easy retrieval
     // Using timestamp as score for chronological sorting
     await redis.zadd(redisKeys.apiRequests(sessionId), Date.now(), reqId);
-    
-    // Update session-level statistics
-    // Track time series data for charting (success/failure, latency)
-    const chartKeyPrefix = redisKeys.apiChart(sessionId); // e.g. api:chart:<sessionId>
-
-    // Round timestamp to minute (or hour for broader buckets)
-    const roundedTime = new Date(Math.floor(Date.now() / (60 * 1000)) * (60 * 1000)).toISOString();
-
-    // Use Redis transaction to ensure atomic operations
-    const multi = redis.multi();
-
-    // Track latency data
-    multi.hincrby(`${chartKeyPrefix}:latency:${roundedTime}`, 'count', 1);
-    multi.hincrbyfloat(`${chartKeyPrefix}:latency:${roundedTime}`, 'totalTimeMs', responseData.timeMs || 0);
-    
-    // Track request counts
-    if (!isRetry) {
-      // Only increment total for new requests, not retries
-      multi.hincrby(`${chartKeyPrefix}:requests:${roundedTime}`, 'total', 1);
-      multi.hincrby(redisKeys.apiStats(sessionId), 'total', 1);
-    }
-
-    // Handle success/failure counts
-    if (isRetry) {
-      if (responseData.success) {
-        // For successful retries, increment success and decrement failure
-        multi.hincrby(redisKeys.apiStats(sessionId), 'success', 1);
-        multi.hincrby(redisKeys.apiStats(sessionId), 'failure', -1);
-        multi.hincrby(`${chartKeyPrefix}:requests:${roundedTime}`, 'success', 1);
-        multi.hincrby(`${chartKeyPrefix}:requests:${roundedTime}`, 'failure', -1);
-      }
-    } else {
-      // For new requests
-      if (responseData.success) {
-        multi.hincrby(redisKeys.apiStats(sessionId), 'success', 1);
-        multi.hincrby(`${chartKeyPrefix}:requests:${roundedTime}`, 'success', 1);
-      } else {
-        multi.hincrby(redisKeys.apiStats(sessionId), 'failure', 1);
-        multi.hincrby(`${chartKeyPrefix}:requests:${roundedTime}`, 'failure', 1);
-      }
-    }
-    
-    // Track status code distribution
-    if (statusCode) {
-      multi.hincrby(`${chartKeyPrefix}:status:${roundedTime}`, `${statusCode}`, 1);
-      multi.hincrby(redisKeys.apiStats(sessionId), `status:${statusCode}`, 1);
-    }
-    
-    // Execute all updates atomically
-    await multi.exec();
-    
+  
     return reqId;
   } catch (err) {
     console.error('Error tracking API call:', err.message);
@@ -110,13 +59,24 @@ async function trackApiCall(sessionId, requestData, responseData, isRetry = fals
 }
 
 // Process single record with retries
-async function processRecord(record, apiUrl, auth, sessionId, jobId, recordIndex, totalRecords) {
-  const maxRetries = 3;
-  let attempt = 0;
-  let lastError = null;
+async function processRecord(record, apiUrl, auth, sessionId, jobId, recordIndex) {
 
   // Prepare headers based on auth type
   const headers = {};
+  let statusCode = 0;
+  let response ;
+  const reqId = record.requestId;
+  const chartKeyPrefix = redisKeys.apiChart(sessionId); // e.g. api:chart:<sessionId>
+  const now = new Date();
+  now.setSeconds(0, 0);
+  const roundedTime = now.getTime();
+  // const id = crypto.randomBytes(12).toString('base64url');
+  const multi = redis.multi();
+  // Add unique request to HyperLogLog for total count (keep for session-level stats)
+  multi.pfadd(`${redisKeys.apiStats(sessionId)}:total`, reqId);
+  // Use Lists for time-series data
+  multi.lpush(`${chartKeyPrefix}:requests:${roundedTime}:total`, reqId);
+  await new Promise(resolve => setTimeout(resolve, 11000));
   
   switch (auth.type) {
     case 'apiKey':
@@ -155,11 +115,10 @@ async function processRecord(record, apiUrl, auth, sessionId, jobId, recordIndex
     recordIndex
   };
 
-  while (attempt < maxRetries) {
     const startTime = Date.now();
     
     try {
-      let response;
+      // let response;
       // Make API call based on HTTP method
       switch (requestData.method.toUpperCase()) {
         case 'GET':
@@ -193,44 +152,14 @@ async function processRecord(record, apiUrl, auth, sessionId, jobId, recordIndex
           throw new Error(`Unsupported HTTP method: ${requestData.method}`);
       }
       
-      // Check if this is a 4xx or 5xx response
-      const isHttpError = response.status >= 400;
-      
-      // Prepare response data
-      const responseData = {
-        status: response.status,
-        headers: response.headers,
-        data: response.data,
-        success: !isHttpError, // Mark 4xx/5xx as failures
-        timeMs: Date.now() - startTime,
-        attempt: attempt + 1
-      };
-      
-      // For HTTP errors, add error information
-      if (isHttpError) {
-        responseData.error = {
-          message: response.headers['response-description'] || `HTTP Error: ${response.status}`,
-          name: 'HttpError',
-          httpStatus: response.status
-        };
-      }
-      
-      // Track Success API call
-      await trackApiCall(sessionId, requestData, responseData, attempt !== 0);
-
-      // Only retry on 5xx errors (server errors)
-      if (response.status >= 500 && attempt < maxRetries - 1) {
-        attempt++;
-        // Exponential backoff for server errors
-        await new Promise(resolve => setTimeout(resolve, Math.pow(2, attempt) * 1000));
-        continue;
-      }
-      
-      return response;
+      multi.pfadd(`${redisKeys.apiStats(sessionId)}:success`, reqId);
+      // Use Lists for time-series data
+      multi.lpush(`${chartKeyPrefix}:requests:${roundedTime}:success`, reqId);
+      // Track status code distribution using Lists for time-series
+      statusCode = response.status;
+      multi.lpush(`${chartKeyPrefix}:status:${roundedTime}:${statusCode}`, reqId);
+      multi.pfadd(`${redisKeys.apiStats(sessionId)}:status:${statusCode}`, reqId);
     } catch (err) {
-      attempt++;
-      lastError = err;
-      const isLastAttempt = attempt === maxRetries;
       
       // Prepare error response data
       const errorData = {
@@ -238,53 +167,67 @@ async function processRecord(record, apiUrl, auth, sessionId, jobId, recordIndex
         headers: err.response?.headers,
         data: err.response?.data,
         error: {
-          message: err.message || err.response?.headers['response-description'],
+          message: err.response?.headers['response-description'] || err.message ,
           name: err.name,
           stack: process.env.NODE_ENV === 'production' ? null : err.stack
         },
         success: false,
         timeMs: Date.now() - startTime,
-        attempt
+        // attempt
       };
-      
+      multi.pfadd(`${redisKeys.apiStats(sessionId)}:failure`, reqId);
+      // Use Lists for time-series data
+      multi.lpush(`${chartKeyPrefix}:requests:${roundedTime}:failure`, reqId);
+      // Track status code distribution using Lists for time-series
+      statusCode = err.response?.status;
+      multi.lpush(`${chartKeyPrefix}:status:${roundedTime}:${statusCode}`, reqId);
+      multi.pfadd(`${redisKeys.apiStats(sessionId)}:status:${statusCode}`, reqId);
       // Track this failed API call
-      await trackApiCall(sessionId, requestData, errorData, attempt !== 0);
-      
-      if (isLastAttempt) throw lastError;
-      
-      // Exponential backoff
-      await new Promise(resolve => setTimeout(resolve, Math.pow(2, attempt) * 1000));
+      await trackApiCall(sessionId, requestData, errorData);
     }
-  }
+
+    // Track latency data (keep this as it's for averages, not counts)
+    multi.hincrby(`${chartKeyPrefix}:latency:${roundedTime}`, 'count', 1);
+    multi.hincrbyfloat(`${chartKeyPrefix}:latency:${roundedTime}`, 'totalTimeMs', Date.now() - startTime || 0);
+    await multi.exec();
+
 }
 
-// Get session statistics
+// Get session statistics using HyperLogLog
 export async function getSessionStats(sessionId) {
   try {
     sessionId = redisKeys.sessionConfig(sessionId);
-    const stats = await redis.hgetall(redisKeys.apiStats(sessionId));
-    if (!stats || Object.keys(stats).length === 0) {
-      return {
-        total: 0,
-        success: 0,
-        failure: 0,
-        statusCodes: {}
-      };
+    
+    // Get HyperLogLog counts for total, success, and failure
+    const [total, success, failure] = await Promise.all([
+      redis.pfcount(`${redisKeys.apiStats(sessionId)}:total`),
+      redis.pfcount(`${redisKeys.apiStats(sessionId)}:success`),
+      redis.pfcount(`${redisKeys.apiStats(sessionId)}:failure`)
+    ]);
+    
+    // Get status code distribution using HyperLogLog
+    const statusCodeKeys = await redis.keys(`${redisKeys.apiStats(sessionId)}:status:*`);
+    const statusCodes = {};
+    
+    if (statusCodeKeys.length > 0) {
+      const statusCounts = await Promise.all(
+        statusCodeKeys.map(key => 
+          redis.pfcount(key).then(count => ({
+            code: key.split(':').pop(),
+            count
+          }))
+        )
+      );
+      
+      statusCounts.forEach(({ code, count }) => {
+        statusCodes[code] = count;
+      });
     }
     
-    // Extract status code information
-    const statusCodes = {};
-    Object.entries(stats).forEach(([key, value]) => {
-      if (key.startsWith('status:')) {
-        const code = key.replace('status:', '');
-        statusCodes[code] = parseInt(value);
-      }
-    });
-    
     return {
-      total: parseInt(stats.total || 0),
-      success: parseInt(stats.success || 0),
-      failure: parseInt(stats.failure || 0),
+      total: total || 0,
+      success: success || 0,
+      failure: failure || 0,
       statusCodes
     };
   } catch (err) {
@@ -425,17 +368,17 @@ export async function retryApiRequest(sessionId, requestId, modifiedRequestBody)
       }
       
       // Track the retry
-      const newRequestId = await trackApiCall(sessionId, {
-        url: originalUrl,
-        headers: originalHeaders,
-        body: originalBody,
-        ...retryContext
-      }, responseData, true);
+      // const newRequestId = await trackApiCall(sessionId, {
+      //   url: originalUrl,
+      //   headers: originalHeaders,
+      //   body: originalBody,
+      //   ...retryContext
+      // }, responseData);
       
       return {
         success: true,
         originalRequestId: requestId,
-        newRequestId,
+        newRequestId: requestId,
         response: {
           status: response.status,
           success: !isHttpError,
@@ -455,8 +398,6 @@ export async function retryApiRequest(sessionId, requestId, modifiedRequestBody)
         },
         success: false,
         timeMs: Date.now() - startTime,
-        attempt: 1,
-        isRetry: true,
         originalRequestId: requestId
       };
       
@@ -466,7 +407,7 @@ export async function retryApiRequest(sessionId, requestId, modifiedRequestBody)
         headers: originalHeaders,
         body: originalBody,
         ...retryContext
-      }, errorData, true);
+      }, errorData);
       
       return {
         success: false,

@@ -16,9 +16,9 @@ router.get('/system-health', async (req, res) => {
         si.fsSize()
       ]);
   
-      console.log('CPU Data:', cpuData.currentload); // Log to debug
+      // console.log('CPU Data:', cpuData?.currentLoad.toFixed(2)); // Log to debug
   
-      const cpu = Math.round(cpuData.currentload)
+      const cpu = Math.round(cpuData?.currentLoad.toFixed(2))
   
       const memory = Math.round((memData.active / memData.total) * 100);
   

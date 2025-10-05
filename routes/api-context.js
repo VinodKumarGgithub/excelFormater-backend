@@ -2,26 +2,30 @@ import express from 'express';
 import redis from '../lib/redis.js';
 import { authenticateJWT } from './sessions.js';
 import { apiContextFunctions } from '../worker.js';
+import { redisKeys } from '../lib/redis/redisKeys.js';
 
 const router = express.Router();
 
 // Protect all routes with JWT authentication
 router.use(authenticateJWT);
 
-// GET /api/requests/sessions - Get all sessions with API requests
+// GET /api/requests/sessions - Get all sessions with API requests using HyperLogLog
 router.get('/requests/sessions', async (req, res) => {
   try {
-    // Find all session keys in Redis
-    const sessionKeys = await redis.keys('apistats:session:*');
+    // Find all session keys in Redis using HyperLogLog pattern
+    const sessionKeys = await redis.keys('apistats:session:*:total');
     
-    // Process each session to get stats
+    // Process each session to get stats using HyperLogLog
     const sessions = await Promise.all(
       sessionKeys.map(async (key) => {
-        const sessionId = key.replace('apistats:', '');
-        const stats = await redis.hgetall(key);
-        const total = parseInt(stats.total || 0);
-        const success = parseInt(stats.success || 0);
-        const failure = parseInt(stats.failure || 0);
+        const sessionId = key.replace('apistats:', '').replace(':total', '');
+        
+        // Get HyperLogLog counts for this session
+        const [total, success, failure] = await Promise.all([
+          redis.pfcount(`${redisKeys.apiStats(sessionId)}:total`),
+          redis.pfcount(`${redisKeys.apiStats(sessionId)}:success`),
+          redis.pfcount(`${redisKeys.apiStats(sessionId)}:failure`)
+        ]);
         
         // Get session details if available
         let sessionDetails = {};
@@ -36,9 +40,9 @@ router.get('/requests/sessions', async (req, res) => {
         
         return {
           sessionId,
-          total,
-          success,
-          failure,
+          total: total || 0,
+          success: success || 0,
+          failure: failure || 0,
           apiUrl: sessionDetails.apiUrl,
           createdAt: sessionId.includes(':') ? 
             new Date(parseInt(sessionId.split(':')[1]) * 1000).toISOString() : 
@@ -238,34 +242,54 @@ router.get('/chart-data/:sessionId', async (req, res) => {
   const { sessionId } = req.params;
 
   try {
-    // Pattern to match: api:chart:<sessionId>:*
-    const pattern = `api:chart:session:${sessionId}:*`;
+    // Pattern to match List keys: api:chart:session:<sessionId>:requests:*:success and :failure
+    const successPattern = `api:chart:session:${sessionId}:requests:*:success`;
+    const failurePattern = `api:chart:session:${sessionId}:requests:*:failure`;
 
-    // Use SCAN instead of KEYS in production for large datasets
+    // Use SCAN to find all time-based keys
     let cursor = '0';
-    let keys = [];
+    let successKeys = [];
+    let failureKeys = [];
+    
+    // Get success keys
     do {
-      const [nextCursor, foundKeys] = await redis.scan(cursor, 'MATCH', pattern, 'COUNT', 100);
+      const [nextCursor, foundKeys] = await redis.scan(cursor, 'MATCH', successPattern, 'COUNT', 100);
       cursor = nextCursor;
-      keys = keys.concat(foundKeys);
+      successKeys = successKeys.concat(foundKeys);
     } while (cursor !== '0');
 
-    // Sort keys chronologically
-    keys.sort();
+    // Get failure keys
+    cursor = '0';
+    do {
+      const [nextCursor, foundKeys] = await redis.scan(cursor, 'MATCH', failurePattern, 'COUNT', 100);
+      cursor = nextCursor;
+      failureKeys = failureKeys.concat(foundKeys);
+    } while (cursor !== '0');
 
-    const pipeline = redis.pipeline();
-    keys.forEach((key) => pipeline.hgetall(key));
-    const results = await pipeline.exec();
+    // Combine and sort keys chronologically
+    const allKeys = [...successKeys, ...failureKeys];
+    const uniqueTimeKeys = [...new Set(allKeys.map(key => {
+      const parts = key.split(':');
+      return parts[parts.length - 2]; // Get the time part (timestamp)
+    }))].sort((a, b) => parseInt(a) - parseInt(b)); // Sort by timestamp numerically
 
-    const chartData = keys.map((key, index) => {
-      const time = key.split(':').pop(); // last segment is the hour key
-      const data = results[index][1];
-      return {
-        time, // e.g., "2025-05-30T10"
-        success: parseInt(data.success || '0', 10),
-        failure: parseInt(data.failure || '0', 10),
-      };
-    });
+    // Get List lengths for each time period (exact counts)
+    const chartData = await Promise.all(
+      uniqueTimeKeys.map(async (time) => {
+        const successCount = await redis.llen(`api:chart:session:${sessionId}:requests:${time}:success`);
+        const failureCount = await redis.llen(`api:chart:session:${sessionId}:requests:${time}:failure`);
+        
+        // Convert timestamp back to readable format for frontend
+        const readableTime = new Date(parseInt(time)).toISOString();
+        
+        return {
+          timestamp: readableTime,
+          time: parseInt(time),
+          success: successCount || 0,
+          failure: failureCount || 0,
+        };
+      })
+    );
 
     res.json({ success: true, message: 'chart data found', sessionId, chartData });
 
