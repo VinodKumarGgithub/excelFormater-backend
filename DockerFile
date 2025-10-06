@@ -1,0 +1,42 @@
+# Use Node.js 20 official image
+FROM node:20-slim
+
+# Maintainer info
+LABEL maintainer="kvinod@medimpactintl.com"
+
+# Set working directory
+WORKDIR /app
+
+# Install system dependencies (no sudo needed in Docker)
+RUN apt-get update && \
+    apt-get install -y git redis-server && \
+    rm -rf /var/lib/apt/lists/*
+
+# Copy package files and install dependencies
+COPY package*.json ./
+
+RUN npm install --production
+
+# Copy app source
+COPY . .
+
+# Expose ports
+EXPOSE 3000 6379
+
+# Create startup script to properly manage Redis and Node processes
+RUN echo '#!/bin/bash\n\
+# Start Redis server in background\n\
+redis-server --daemonize yes --bind 0.0.0.0\n\
+\n\
+# Wait a moment for Redis to start\n\
+sleep 2\n\
+\n\
+# Start Node.js application and worker in background\n\
+npm run start &\n\
+npm run worker &\n\
+\n\
+# Wait for any process to exit\n\
+wait' > /app/start.sh && chmod +x /app/start.sh
+
+# Use the startup script
+CMD ["/app/start.sh"]
