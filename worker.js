@@ -1,9 +1,11 @@
 import { Worker, Job } from 'bullmq';
+import dotenv from 'dotenv';
+dotenv.config();
 import axios from 'axios';
 import redis from './lib/redis.js';
 import { redisKeys } from './lib/redis/redisKeys.js';
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
-console.error('Worker started');
+// console.error('Worker started', typeof process.env.WORKER_CONCURRENCY);
 // Configure axios instance with defaults
 const api = axios.create({
   timeout: 30000,
@@ -195,7 +197,7 @@ async function processRecord(record, apiUrl, auth, sessionId, jobId, recordIndex
 const newWorker = new Worker(
   'batchQueue',
   async (job) => {
-    console.error('Worker started');
+    // console.error('Worker started');
     const { sessionId, records } = job.data;
     const jobId = job.id;
     let successCount = 0;
@@ -220,7 +222,7 @@ const newWorker = new Worker(
         successCount++;
       } catch (err) {
         failureCount++;
-        console.error(`Error processing record ${i}:`, err.message);
+        // console.error(`Error processing record ${i}:`, err.message);
       }
 
       // Update progress
@@ -241,7 +243,7 @@ const newWorker = new Worker(
     };
   },
   {
-    concurrency: 10, // Strictly limit to 10 concurrent jobs
+    concurrency: parseInt(process.env.WORKER_CONCURRENCY) || 1, // Strictly limit to 10 concurrent jobs
     settings: {
       retryProcessDelay: 5000,
       backoffDelay: 5000
