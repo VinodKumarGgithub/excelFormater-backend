@@ -1,5 +1,12 @@
 import redis from "../lib/redis.js";
 import { redisKeys } from "../lib/redis/redisKeys.js";
+import axios from "axios";
+
+// Configure axios instance with defaults
+const api = axios.create({
+  timeout: 30000,
+  validateStatus: status => status < 300 // Retry only on 500+ errors
+});
 
 // Get session statistics using HyperLogLog
 export async function getSessionStats(sessionId) {
@@ -127,6 +134,7 @@ export async function getSessionStats(sessionId) {
       // Parse the original data
       const originalHeaders = JSON.parse(requestData.requestHeaders || '{}');
       const originalUrl = requestData.requestUrl;
+      const originalMethod = requestData.requestMethod || 'POST';
       const originalBody = modifiedRequestBody || JSON.parse(requestData.requestBody || '{}');
       
       // Get session config to verify we can still access the API
@@ -141,47 +149,63 @@ export async function getSessionStats(sessionId) {
       const retryContext = {
         originalRequestId: requestId,
         timestamp: new Date().toISOString(),
-        isRetry: true
+        // isRetry: true
       };
       
       // Execute the retry
       const startTime = Date.now();
+      const now = new Date();
+      now.setSeconds(0, 0);
+      const roundedTime = now.getTime();
+      const chartKeyPrefix = redisKeys.apiChart(sessionId);
+      const multi = redis.multi();
+
       try {
-        const response = await api.post(originalUrl, originalBody, { 
-          headers: originalHeaders 
-        });
+        let response;
+        
+        // Make API call based on HTTP method
+        switch (originalMethod.toUpperCase()) {
+          case 'GET':
+            response = await api.get(originalUrl, { 
+              headers: originalHeaders,
+              params: originalBody
+            });
+            break;
+          case 'POST':
+            response = await api.post(originalUrl, originalBody, { headers: originalHeaders });
+            break;
+          case 'PUT':
+            response = await api.put(originalUrl, originalBody, { headers: originalHeaders });
+            break;
+          case 'PATCH':
+            response = await api.patch(originalUrl, originalBody, { headers: originalHeaders });
+            break;
+          case 'DELETE':
+            response = await api.delete(originalUrl, { 
+              headers: originalHeaders,
+              data: originalBody
+            });
+            break;
+          case 'HEAD':
+            response = await api.head(originalUrl, { headers: originalHeaders });
+            break;
+          case 'OPTIONS':
+            response = await api.options(originalUrl, { headers: originalHeaders });
+            break;
+          default:
+            throw new Error(`Unsupported HTTP method: ${originalMethod}`);
+        }
         
         // Check if this is a 4xx or 5xx response
         const isHttpError = response.status >= 400;
-        
-        // Prepare response data
-        const responseData = {
-          status: response.status,
-          headers: response.headers,
-          data: response.data,
-          success: !isHttpError,
-          timeMs: Date.now() - startTime,
-          attempt: 1,
-          isRetry: true,
-          originalRequestId: requestId
-        };
-        
-        // For HTTP errors, add error information
-        if (isHttpError) {
-          responseData.error = {
-            message: response.headers['response-description'] || `HTTP Error: ${response.status}`,
-            name: 'HttpError',
-            httpStatus: response.status
-          };
-        }
-        
-        // Track the retry
-        // const newRequestId = await trackApiCall(sessionId, {
-        //   url: originalUrl,
-        //   headers: originalHeaders,
-        //   body: originalBody,
-        //   ...retryContext
-        // }, responseData);
+        multi.pfadd(`${redisKeys.apiStats(sessionId)}:success`, requestId);
+      // Use Lists for time-series data
+      multi.lpush(`${chartKeyPrefix}:requests:${roundedTime}:success`, requestId);
+      // Track status code distribution using Lists for time-series
+      const statusCode = response.status;
+      multi.lpush(`${chartKeyPrefix}:status:${roundedTime}:${statusCode}`, requestId);
+      multi.pfadd(`${redisKeys.apiStats(sessionId)}:status:${statusCode}`, requestId);
+      await multi.exec();
         
         return {
           success: true,
@@ -194,35 +218,13 @@ export async function getSessionStats(sessionId) {
           }
         };
       } catch (err) {
-        // Handle error case
-        const errorData = {
-          status: err.response?.status,
-          headers: err.response?.headers,
-          data: err.response?.data,
-          error: {
-            message: err.message || err.response?.headers['response-description'],
-            name: err.name,
-            stack: process.env.NODE_ENV === 'production' ? null : err.stack
-          },
-          success: false,
-          timeMs: Date.now() - startTime,
-          originalRequestId: requestId
-        };
-        
-        // Track the failed retry
-        const newRequestId = await trackApiCall(sessionId, {
-          url: originalUrl,
-          headers: originalHeaders,
-          body: originalBody,
-          ...retryContext
-        }, errorData);
         
         return {
           success: false,
           originalRequestId: requestId,
-          newRequestId,
+          newRequestId: requestId,
           error: {
-            message: err.message,
+            message: err.response?.headers['response-description'] || err.message,
             status: err.response?.status
           }
         };
