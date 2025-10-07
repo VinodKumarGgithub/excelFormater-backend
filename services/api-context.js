@@ -2,6 +2,8 @@ import redis from "../lib/redis.js";
 import { redisKeys } from "../lib/redis/redisKeys.js";
 import axios from "axios";
 
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+
 // Configure axios instance with defaults
 const api = axios.create({
   timeout: 30000,
