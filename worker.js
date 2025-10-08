@@ -16,7 +16,7 @@ const api = axios.create({
 async function trackApiCall(sessionId, requestData, responseData, isRetry = false) {
   try {
     // Generate unique ID using timestamp and random value
-    const reqId = requestData.requestId || `random-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
+    const reqId = requestData.body.requestId ? requestData.body.requestId : `random-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
 
     // Determine if the response should be considered a failure based on status code
     // Consider any 4xx or 5xx response as a failure
@@ -73,8 +73,8 @@ async function processRecord(record, apiUrl, auth, sessionId, jobId, recordIndex
   const roundedTime = now.getTime();
   // const id = crypto.randomBytes(12).toString('base64url');
   const multi = redis.multi();
-  // Add unique request to HyperLogLog for total count (keep for session-level stats)
-  multi.pfadd(`${redisKeys.apiStats(sessionId)}:total`, reqId);
+  // Add unique request to set for total count (exact count)
+  multi.sadd(redisKeys.apiTotal(sessionId), reqId);
   // Use Lists for time-series data
   multi.lpush(`${chartKeyPrefix}:requests:${roundedTime}:total`, reqId);
   
@@ -152,13 +152,13 @@ async function processRecord(record, apiUrl, auth, sessionId, jobId, recordIndex
           throw new Error(`Unsupported HTTP method: ${requestData.method}`);
       }
       
-      multi.pfadd(`${redisKeys.apiStats(sessionId)}:success`, reqId);
+      multi.sadd(redisKeys.apiSuccess(sessionId), reqId);
       // Use Lists for time-series data
       multi.lpush(`${chartKeyPrefix}:requests:${roundedTime}:success`, reqId);
       // Track status code distribution using Lists for time-series
       statusCode = response.status;
       multi.lpush(`${chartKeyPrefix}:status:${roundedTime}:${statusCode}`, reqId);
-      multi.pfadd(`${redisKeys.apiStats(sessionId)}:status:${statusCode}`, reqId);
+      multi.sadd(`${redisKeys.apiStats(sessionId)}:status:${statusCode}`, reqId);
     } catch (err) {
       
       // Prepare error response data
@@ -175,13 +175,13 @@ async function processRecord(record, apiUrl, auth, sessionId, jobId, recordIndex
         timeMs: Date.now() - startTime,
         // attempt
       };
-      multi.pfadd(`${redisKeys.apiStats(sessionId)}:failure`, reqId);
+      multi.sadd(redisKeys.apiFailure(sessionId), reqId);
       // Use Lists for time-series data
       multi.lpush(`${chartKeyPrefix}:requests:${roundedTime}:failure`, reqId);
       // Track status code distribution using Lists for time-series
       statusCode = err.response?.status;
       multi.lpush(`${chartKeyPrefix}:status:${roundedTime}:${statusCode}`, reqId);
-      multi.pfadd(`${redisKeys.apiStats(sessionId)}:status:${statusCode}`, reqId);
+      multi.sadd(`${redisKeys.apiStats(sessionId)}:status:${statusCode}`, reqId);
       // Track this failed API call
       await trackApiCall(sessionId, requestData, errorData);
     }

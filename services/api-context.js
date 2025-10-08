@@ -10,26 +10,26 @@ const api = axios.create({
   validateStatus: status => status < 300 // Retry only on 500+ errors
 });
 
-// Get session statistics using HyperLogLog
+// Get session statistics using sets
 export async function getSessionStats(sessionId) {
     try {
       sessionId = redisKeys.sessionConfig(sessionId);
       
-      // Get HyperLogLog counts for total, success, and failure
+      // Get set counts for total, success, and failure
       const [total, success, failure] = await Promise.all([
-        redis.pfcount(`${redisKeys.apiStats(sessionId)}:total`),
-        redis.pfcount(`${redisKeys.apiStats(sessionId)}:success`),
-        redis.pfcount(`${redisKeys.apiStats(sessionId)}:failure`)
+        redis.scard(redisKeys.apiTotal(sessionId)),
+        redis.scard(redisKeys.apiSuccess(sessionId)),
+        redis.scard(redisKeys.apiFailure(sessionId))
       ]);
       
-      // Get status code distribution using HyperLogLog
+      // Get status code distribution using sets
       const statusCodeKeys = await redis.keys(`${redisKeys.apiStats(sessionId)}:status:*`);
       const statusCodes = {};
       
       if (statusCodeKeys.length > 0) {
         const statusCounts = await Promise.all(
           statusCodeKeys.map(key => 
-            redis.pfcount(key).then(count => ({
+            redis.scard(key).then(count => ({
               code: key.split(':').pop(),
               count
             }))
@@ -124,6 +124,48 @@ export async function getSessionStats(sessionId) {
     }
   }
   
+  // Function to get all failed requests for a session
+  export async function getFailedRequests(sessionId) {
+    try {
+      sessionId = redisKeys.sessionConfig(sessionId);
+      
+      // Get all request IDs from the failure set
+      const failedRequestIds = await redis.smembers(redisKeys.apiFailure(sessionId));
+      
+      if (!failedRequestIds || failedRequestIds.length === 0) {
+        return [];
+      }
+      
+      // Get request data for each failed request
+      const failedRequests = [];
+      for (const reqId of failedRequestIds) {
+        const data = await redis.hgetall(redisKeys.apiData(sessionId, reqId));
+        if (data) {
+          // Convert JSON strings back to objects where needed
+          if (data.requestHeaders) data.requestHeaders = JSON.parse(data.requestHeaders);
+          if (data.requestBody) data.requestBody = JSON.parse(data.requestBody);
+          if (data.responseHeaders) data.responseHeaders = JSON.parse(data.responseHeaders);
+          if (data.responseData) data.responseData = JSON.parse(data.responseData);
+          
+          // Convert string numbers to actual numbers
+          data.responseStatus = parseInt(data.responseStatus || 0);
+          data.success = data.success === '1';
+          data.timeMs = parseInt(data.timeMs || 0);
+          
+          // Add the request ID
+          data.id = reqId;
+          
+          failedRequests.push(data);
+        }
+      }
+      
+      return failedRequests;
+    } catch (err) {
+      console.error('Error getting failed requests:', err.message);
+      return [];
+    }
+  }
+
   // Function to retry a specific API request with optional modifications
   export async function retryApiRequest(sessionId, requestId, modifiedRequestBody) {
     try {
@@ -200,14 +242,48 @@ export async function getSessionStats(sessionId) {
         
         // Check if this is a 4xx or 5xx response
         const isHttpError = response.status >= 400;
-        multi.pfadd(`${redisKeys.apiStats(sessionId)}:success`, requestId);
-      // Use Lists for time-series data
-      multi.lpush(`${chartKeyPrefix}:requests:${roundedTime}:success`, requestId);
-      // Track status code distribution using Lists for time-series
-      const statusCode = response.status;
-      multi.lpush(`${chartKeyPrefix}:status:${roundedTime}:${statusCode}`, requestId);
-      multi.pfadd(`${redisKeys.apiStats(sessionId)}:status:${statusCode}`, requestId);
-      await multi.exec();
+        
+        if (!isHttpError) {
+          // Move from failure to success set (sadd is idempotent, so safe to call even if already in success set)
+          multi.srem(redisKeys.apiFailure(sessionId), requestId);
+          multi.sadd(redisKeys.apiSuccess(sessionId), requestId);
+          // Remove the stored request data entry after successful retry
+          multi.del(redisKeys.apiData(sessionId, requestId));
+          // Remove from sorted set used for table display
+          multi.zrem(redisKeys.apiRequests(sessionId), requestId);
+          // Use Lists for time-series data - success
+          multi.lpush(`${chartKeyPrefix}:requests:${roundedTime}:success`, requestId);
+        } else {
+          // Still failed, keep in failure set and add to failure time-series
+          multi.lpush(`${chartKeyPrefix}:requests:${roundedTime}:failure`, requestId);
+        }
+        
+        // Track status code distribution using Lists for time-series
+        const statusCode = response.status;
+        multi.lpush(`${chartKeyPrefix}:status:${roundedTime}:${statusCode}`, requestId);
+        multi.sadd(`${redisKeys.apiStats(sessionId)}:status:${statusCode}`, requestId);
+        
+         // Update the stored request data with new response (only if still failed)
+         if (isHttpError) {
+           const updatedData = {
+             timestamp: new Date().toISOString(),
+             requestUrl: originalUrl,
+             requestMethod: originalMethod,
+             requestHeaders: JSON.stringify(originalHeaders),
+             requestBody: JSON.stringify(originalBody), // This is the modified body that was sent
+             responseStatus: response.status,
+             responseHeaders: JSON.stringify(response.headers || {}),
+             responseData: JSON.stringify(response.data || {}),
+             success: '0',
+             error: `HTTP Error: ${response.status}`,
+             timeMs: Date.now() - startTime,
+           };
+           multi.hmset(redisKeys.apiData(sessionId, requestId), updatedData);
+           // Update the timestamp in sorted set for table display (so it appears at the top)
+           multi.zadd(redisKeys.apiRequests(sessionId), Date.now(), requestId);
+         }
+        
+        await multi.exec();
         
         return {
           success: true,
@@ -219,7 +295,26 @@ export async function getSessionStats(sessionId) {
             data: response.data
           }
         };
-      } catch (err) {
+       } catch (err) {
+         // Handle retry failure - keep in failure set and update error data
+         const errorData = {
+           timestamp: new Date().toISOString(),
+           requestUrl: originalUrl,
+           requestMethod: originalMethod,
+           requestHeaders: JSON.stringify(originalHeaders),
+           requestBody: JSON.stringify(originalBody), // This is the modified body that was sent
+           responseStatus: err.response?.status || 0,
+           responseHeaders: JSON.stringify(err.response?.headers || {}),
+           responseData: JSON.stringify(err.response?.data || {}),
+           success: '0',
+           error: err.response?.headers['response-description'] || err.message,
+           timeMs: Date.now() - startTime,
+         };
+         
+         // Update the stored request data with error response
+         await redis.hmset(redisKeys.apiData(sessionId, requestId), errorData);
+         // Update the timestamp in sorted set for table display (so it appears at the top)
+         await redis.zadd(redisKeys.apiRequests(sessionId), Date.now(), requestId);
         
         return {
           success: false,
@@ -237,9 +332,79 @@ export async function getSessionStats(sessionId) {
     }
   }
 
+  // Function to retry all failed requests for a session
+  export async function retryAllFailedRequests(sessionId) {
+    try {
+      sessionId = redisKeys.sessionConfig(sessionId);
+      
+      // Get all failed requests
+      const failedRequests = await getFailedRequests(sessionId);
+      
+      if (failedRequests.length === 0) {
+        return {
+          success: true,
+          message: 'No failed requests found to retry',
+          results: [],
+          summary: {
+            total: 0,
+            successful: 0,
+            failed: 0
+          }
+        };
+      }
+      
+      const results = [];
+      let successfulRetries = 0;
+      let failedRetries = 0;
+      
+      // Retry each failed request
+      for (const request of failedRequests) {
+        try {
+          const result = await retryApiRequest(sessionId, request.id);
+          results.push({
+            requestId: request.id,
+            success: result.success,
+            status: result.response?.status || result.error?.status,
+            message: result.response?.data || result.error?.message
+          });
+          
+          if (result.success) {
+            successfulRetries++;
+          } else {
+            failedRetries++;
+          }
+        } catch (err) {
+          results.push({
+            requestId: request.id,
+            success: false,
+            status: 0,
+            message: err.message
+          });
+          failedRetries++;
+        }
+      }
+      
+      return {
+        success: true,
+        message: `Retried ${failedRequests.length} failed requests`,
+        results,
+        summary: {
+          total: failedRequests.length,
+          successful: successfulRetries,
+          failed: failedRetries
+        }
+      };
+    } catch (err) {
+      console.error('Error retrying all failed requests:', err.message);
+      throw err;
+    }
+  }
+
   // Export functions for API routes
 export const apiContextFunctions = {
     getSessionStats,
     getApiRequestsForTable,
-    retryApiRequest
+    retryApiRequest,
+    retryAllFailedRequests,
+    getFailedRequests
   };

@@ -12,19 +12,19 @@ router.use(authenticateJWT);
 // GET /api/requests/sessions - Get all sessions with API requests using HyperLogLog
 router.get('/requests/sessions', async (req, res) => {
   try {
-    // Find all session keys in Redis using HyperLogLog pattern
+    // Find all session keys in Redis using set pattern
     const sessionKeys = await redis.keys('apistats:session:*:total');
     
-    // Process each session to get stats using HyperLogLog
+    // Process each session to get stats using sets
     const sessions = await Promise.all(
       sessionKeys.map(async (key) => {
         const sessionId = key.replace('apistats:', '').replace(':total', '');
         
-        // Get HyperLogLog counts for this session
+        // Get set counts for this session
         const [total, success, failure] = await Promise.all([
-          redis.pfcount(`${redisKeys.apiStats(sessionId)}:total`),
-          redis.pfcount(`${redisKeys.apiStats(sessionId)}:success`),
-          redis.pfcount(`${redisKeys.apiStats(sessionId)}:failure`)
+          redis.scard(redisKeys.apiTotal(sessionId)),
+          redis.scard(redisKeys.apiSuccess(sessionId)),
+          redis.scard(redisKeys.apiFailure(sessionId))
         ]);
         
         // Get session details if available
@@ -66,7 +66,8 @@ router.get('/requests/sessions', async (req, res) => {
 // GET /api/requests/:sessionId/stats - Get aggregated statistics for a session
 router.get('/requests/:sessionId/stats', async (req, res) => {
   try {
-    const { sessionId } = req.params;
+    let { sessionId } = req.params;
+    sessionId = sessionId?.replace("session:","");
     
     // Check if session exists
     const sessionExists = await redis.exists(`session:${sessionId}`);
@@ -101,7 +102,8 @@ router.get('/requests/:sessionId/stats', async (req, res) => {
 // GET /api/requests/:sessionId/table - Get API requests for UI table with pagination
 router.get('/requests/:sessionId/table', async (req, res) => {
   try {
-    const { sessionId } = req.params;
+    let { sessionId } = req.params;
+    sessionId = sessionId?.replace("session:","");
     const page = parseInt(req.query.page) || 0;
     const pageSize = parseInt(req.query.pageSize) || 50;
     const filterSuccess = req.query.success;
@@ -208,7 +210,7 @@ router.post('/requests/:sessionId/:requestId/retry', async (req, res) => {
   try {
     let { sessionId, requestId } = req.params;
     const { modifiedRequestBody } = req.body;
-    sessionId = `session:${sessionId}`;
+    sessionId = `session:${sessionId?.replace("session:","")}`;
     
     // Check if the request exists
     const requestExists = await redis.exists(`apidata:${sessionId}:${requestId}`);
@@ -238,8 +240,39 @@ router.post('/requests/:sessionId/:requestId/retry', async (req, res) => {
   }
 });
 
+// POST /api/requests/:sessionId/retry-all - Retry all failed requests for a session
+router.post('/requests/:sessionId/retry-all', async (req, res) => {
+  try {
+    let { sessionId } = req.params;
+    sessionId = `session:${sessionId?.replace("session:","")}`;
+    
+    // Check if session exists
+    const sessionExists = await redis.exists(`session:${sessionId}`);
+    if (!sessionExists) {
+      return res.status(404).json({ error: 'Session not found' });
+    }
+    
+    // Retry all failed requests
+    const result = await apiContextFunctions.retryAllFailedRequests(sessionId);
+    
+    res.json({
+      success: true,
+      message: result.message,
+      sessionId,
+      results: result.results,
+      summary: result.summary
+    });
+  } catch (err) {
+    res.status(500).json({ 
+      success: false,
+      error: err.message 
+    });
+  }
+});
+
 router.get('/chart-data/:sessionId', async (req, res) => {
-  const { sessionId } = req.params;
+  let { sessionId } = req.params;
+  sessionId = sessionId?.replace("session:","");
 
   try {
     // Pattern to match List keys: api:chart:session:<sessionId>:requests:*:success and :failure
