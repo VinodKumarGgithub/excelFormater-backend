@@ -244,7 +244,7 @@ router.post('/requests/:sessionId/:requestId/retry', async (req, res) => {
 router.post('/requests/:sessionId/retry-all', async (req, res) => {
   try {
     let { sessionId } = req.params;
-    sessionId = `session:${sessionId?.replace("session:","")}`;
+    sessionId = sessionId?.replace("session:","");
     
     // Check if session exists
     const sessionExists = await redis.exists(`session:${sessionId}`);

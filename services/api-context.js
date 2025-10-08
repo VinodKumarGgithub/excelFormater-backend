@@ -127,7 +127,6 @@ export async function getSessionStats(sessionId) {
   // Function to get all failed requests for a session
   export async function getFailedRequests(sessionId) {
     try {
-      sessionId = redisKeys.sessionConfig(sessionId);
       
       // Get all request IDs from the failure set
       const failedRequestIds = await redis.smembers(redisKeys.apiFailure(sessionId));
