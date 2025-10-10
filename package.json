@@ -6,12 +6,24 @@
   "scripts": {
     "start": "node index.js --env NODE_ENV=production",
     "dev": "nodemon index.js --env NODE_ENV=development",
-    "worker": "node worker.js"
+    "worker": "node worker.js",
+    "db:seed": "sequelize-cli db:seed:all",
+    "db:seed:undo": "sequelize-cli db:seed:undo:all",
+    "seed:users": "node scripts/seedUsers.js seed",
+    "seed:users:clear": "node scripts/seedUsers.js clear",
+    "seed:users:list": "node scripts/seedUsers.js list",
+    "seed:users:reset": "node scripts/seedUsers.js reset",
+    "seed:ips": "node scripts/seedAllowedIPs.js seed",
+    "seed:ips:clear": "node scripts/seedAllowedIPs.js clear",
+    "seed:ips:list": "node scripts/seedAllowedIPs.js list",
+    "seed:ips:reset": "node scripts/seedAllowedIPs.js reset",
+    "seed:all": "npm run seed:users && npm run seed:ips"
   },
   "dependencies": {
     "@bull-board/api": "^5.0.0",
     "@bull-board/express": "^5.0.0",
     "axios": "^1.5.0",
+    "bcryptjs": "^2.4.3",
     "bottleneck": "^2.19.5",
     "bullmq": "^4.0.0",
     "cors": "^2.8.5",
@@ -22,8 +34,13 @@
     "ip": "^2.0.1",
     "jsonwebtoken": "^9.0.2",
     "jwks-rsa": "^3.2.0",
+    "mysql2": "^3.6.5",
     "pino": "^8.16.2",
     "pino-pretty": "^10.2.3",
+    "sequelize": "^6.35.2",
     "systeminformation": "^5.27.0"
+  },
+  "devDependencies": {
+    "sequelize-cli": "^6.6.2"
   }
 }

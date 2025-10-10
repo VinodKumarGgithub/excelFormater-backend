@@ -2,31 +2,12 @@ import express from 'express';
 import redis from '../lib/redis.js';
 import jwt from 'jsonwebtoken';
 import { getDemoUser } from '../lib/demousers.js';
+import { authenticate } from '../services/userService.js';
 // import jwksClient from 'jwks-rsa';
 
 const router = express.Router();
 
 const JWT_SECRET = process.env.JWT_SECRET || 'sd@!v@#$%^&*()_+';
-// const MS_CLIENT_ID = process.env.CLIENT_ID || '13712633-346e-4b99-b9a2-07395a5ec88c';
-// const MS_TENANT_ID = process.env.TENANT_ID ;
-
-// Configure jwks-rsa client for Microsoft Identity Platform keys
-// Use tenant-specific endpoint if TENANT_ID is available, otherwise use common
-// const jwksUri = MS_TENANT_ID 
-//   ? `https://login.microsoftonline.com/${MS_TENANT_ID}/discovery/v2.0/keys`
-//   : `https://login.microsoftonline.com/common/discovery/v2.0/keys`;
-
-// const client = jwksClient({
-//   jwksUri: jwksUri
-// });
-
-// Helper function to get the signing key
-// function getKey(header, callback){
-//   client.getSigningKey(header.kid, function(err, key) {
-//     const signingKey = key.getPublicKey();
-//     callback(null, signingKey);
-//   });
-// }
 
 // JWT authentication middleware
 export function authenticateJWT(req, res, next) {
@@ -44,11 +25,11 @@ export function authenticateJWT(req, res, next) {
 }
 
 // POST /api/login
-router.post('/login', (req, res) => {
+router.post('/login', async (req, res) => {
   const { username, password } = req.body;
   try{
 
-  const user = getDemoUser(username, password);
+  const user = await authenticate(username, password);
   if (user) {
     const token = jwt.sign({ userId: user.userId, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
     return res.json({
@@ -63,53 +44,6 @@ router.post('/login', (req, res) => {
     res.status(401).json({ success: false, message: error.message });
   }
 });
-
-// POST /api/auth/o-auth-ms - Microsoft OAuth ID token verification
-// router.post('/auth/o-auth-ms', (req, res) => {
-//   const { idToken } = req.body;
-
-//   if (!idToken) {
-//     return res.status(400).json({ success: false, message: 'Missing idToken' });
-//   }
-
-//   if (!MS_CLIENT_ID) {
-//     console.error('CLIENT_ID not configured in .env');
-//     return res.status(500).json({ success: false, message: 'Server configuration error' });
-//   }
-  
-//   jwt.verify(idToken, getKey, { audience: MS_CLIENT_ID }, (err, decoded) => {
-//     if (err) {
-//       console.error('ID token verification failed:', err.message);
-//       return res.status(401).json({ success: false, message: 'Invalid ID token' });
-//     }
-
-//     // Extract user information from the decoded token payload
-//     const userId = decoded.oid || decoded.sub; // OID is preferred, fallback to sub
-//     const email = decoded.preferred_username || decoded.email;
-//     const name = decoded.name;
-//     const role = 'admin'; // Default role for OAuth users, adjust if needed
-
-//     if (!userId || !email || !name) {
-//          console.error('Required user info missing in ID token payload', decoded);
-//          return res.status(401).json({ success: false, message: 'Incomplete user information in token' });
-//     }
-
-//     // Issue a new application JWT
-//     // const appToken = jwt.sign(
-//     //   { userId, email, name, role }, 
-//     //   JWT_SECRET, 
-//     //   { expiresIn: '1h' } // Token valid for 1 hour
-//     // );
-//     const token = jwt.sign({ userId, role, email }, JWT_SECRET, { expiresIn: '7d' });
-//     return res.json({
-//       token,
-//       user: { username:name },
-//       message: 'Login successful'
-//     });
-
-//     // res.json({ token: appToken });
-//   });
-// });
 
 // Protect all routes below this line
 router.use(authenticateJWT);

@@ -26,6 +26,9 @@ typings/
 # Optional npm cache directory
 .npm
 
+# ignore scripts
+scripts/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

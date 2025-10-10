@@ -16,6 +16,7 @@ import { requestLogger, errorLogger } from './middleware/logger.js';
 import { globalErrorHandler } from './middleware/error.js';
 import systemHealthRouter from './routes/systemHealth.js';
 import adminRouter from './routes/admin.js';
+import { initializeDatabase } from './models/index.js';
 
 const app = express();
 const batchQueue = new Queue('batchQueue', { connection: redis });
@@ -46,5 +47,20 @@ app.use('/api/admin', adminRouter);
 
 // Error handling middleware
 app.use(globalErrorHandler);
+
+// Initialize database connection
+const startServer = async () => {
+  try {
+    const dbInitialized = await initializeDatabase();
+    if (!dbInitialized) {
+      console.error('❌ Failed to initialize database. Server may not function properly.');
+    }
+  } catch (error) {
+    console.error('❌ Database initialization error:', error.message);
+  }
+};
+
+// Initialize database on startup
+startServer();
 
 export default app;
