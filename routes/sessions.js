@@ -1,9 +1,16 @@
 import express from 'express';
-import redis from '../lib/redis.js';
 import jwt from 'jsonwebtoken';
-import { getDemoUser } from '../lib/demousers.js';
 import { authenticate } from '../services/userService.js';
-// import jwksClient from 'jwks-rsa';
+import { 
+  createSession, 
+  getSessionById, 
+  getSessionsByUserId, 
+  getAllSessions,
+  updateSessionStatus,
+  updateSession,
+  deleteSession,
+  getSessionStats
+} from '../services/sessionService.js';
 
 const router = express.Router();
 
@@ -50,58 +57,233 @@ router.use(authenticateJWT);
 
 // POST /api/init-session
 router.post('/init-session', async (req, res) => {
-  const { apiUrl, auth, method } = req.body;
-  if (!apiUrl || !auth || !method) return res.status(400).json({ error: 'Missing data' });
-  const sessionId = 'session:' + Date.now().toString(36) + Math.random().toString(36).substr(2, 6);
-
-  await redis.set(sessionId, JSON.stringify({ apiUrl, auth, method })); // no expiration
-  // Push sessionId to user session list
-  await redis.lpush(`user:sessions:${req.user.userId}`, sessionId);
-  res.json({ sessionId });
+  try {
+    const { apiUrl, auth, method, fileSize, fileType } = req.body;
+    
+    if (!apiUrl || !auth || !method) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Missing required fields: apiUrl, auth, method' 
+      });
+    }
+    
+    // Generate session ID
+    const sessionId = 'session:' + Date.now().toString(36) + Math.random().toString(36).substr(2, 6);
+    
+    // Create session in both database and Redis
+    const session = await createSession({
+      sessionId,
+      userId: req.user.userId,
+      apiUrl,
+      auth,
+      method,
+      fileSize: fileSize || 0,
+      fileType: fileType || null
+    });
+    
+    res.json({ 
+      success: true, 
+      sessionId,
+      message: 'Session initialized successfully',
+      data: {
+        sessionId,
+        apiUrl,
+        method,
+        fileSize: fileSize || 0,
+        fileType: fileType || null,
+        status: 'ACTIVE',
+        createdAt: session.createdAt
+      }
+    });
+  } catch (error) {
+    console.error('Error initializing session:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: error.message || 'Failed to initialize session' 
+    });
+  }
 });
 
 // GET /api/sessions
 router.get('/sessions', async (req, res) => {
   try {
-    const { userId, role } = req.user || {}; // Adjust according to your auth middleware
+    const { userId, role } = req.user || {};
+    const { limit = 50, offset = 0, status } = req.query;
 
-    let sessionIds = [];
+    let result;
 
-    if (role === 'admin') {
-      // Admin: get all session keys
-      const keys = await redis.keys('session:*');
-      sessionIds = keys.map(key => key.replace('session:', ''));
+    if (role === 'ADMIN') {
+      // Admin: get all sessions
+      result = await getAllSessions({
+        limit: parseInt(limit),
+        offset: parseInt(offset),
+        status
+      });
     } else {
       if (!userId) {
-        return res.status(400).json({ success: false, message: 'Missing userId' });
+        return res.status(400).json({ 
+          success: false, 
+          message: 'Missing userId' 
+        });
       }
-      // Non-admin: get sessions from user's list
-      sessionIds = await redis.lrange(`user:sessions:${userId}`, 0, -1);
+      // Non-admin: get user's sessions
+      result = await getSessionsByUserId(userId, {
+        limit: parseInt(limit),
+        offset: parseInt(offset),
+        status
+      });
     }
 
-    const sessionInfo = await Promise.all(
-      sessionIds.map(async (sessionId) => {
-        // Get session details
-        const sessionData = await redis.get(`session:${sessionId}`);
-        const sessionDetails = sessionData ? JSON.parse(sessionData) : {};
+    res.json({
+      success: true,
+      data: result.sessions,
+      pagination: result.pagination
+    });
+  } catch (error) {
+    console.error('Error fetching sessions:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: error.message || 'Failed to fetch sessions' 
+    });
+  }
+});
 
-        // Extract timestamp from sessionId (assuming same format)
-        const timestampPart = sessionId.slice(8, 16); // adjust if needed
-        const createdAt = timestampPart
-          ? new Date(parseInt(timestampPart, 36) * 1000).toISOString()
-          : null;
+// GET /api/sessions/:sessionId
+router.get('/sessions/:sessionId', async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+    const { userId, role } = req.user || {};
 
-        return {
-          sessionId,
-          apiUrl: sessionDetails.apiUrl,
-          createdAt,
-        };
-      })
-    );
+    const session = await getSessionById(sessionId);
+    
+    if (!session) {
+      return res.status(404).json({
+        success: false,
+        message: 'Session not found'
+      });
+    }
 
-    res.json(sessionInfo);
-  } catch (err) {
-    res.status(500).json({ success: false, message: 'Oops! Something went wrong, Contact Support at support@example.com' });
+    // Check if user has access to this session
+    if (role !== 'ADMIN' && session.userId !== userId) {
+      return res.status(403).json({
+        success: false,
+        message: 'Access denied'
+      });
+    }
+
+    res.json({
+      success: true,
+      data: session
+    });
+  } catch (error) {
+    console.error('Error fetching session:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Failed to fetch session'
+    });
+  }
+});
+
+// PUT /api/sessions/:sessionId
+router.put('/sessions/:sessionId', async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+    const { userId, role } = req.user || {};
+    const updateData = req.body;
+
+    // Check if user has access to this session
+    const session = await getSessionById(sessionId);
+    if (!session) {
+      return res.status(404).json({
+        success: false,
+        message: 'Session not found'
+      });
+    }
+
+    if (role !== 'ADMIN' && session.userId !== userId) {
+      return res.status(403).json({
+        success: false,
+        message: 'Access denied'
+      });
+    }
+
+    const updatedSession = await updateSession(sessionId, updateData);
+
+    res.json({
+      success: true,
+      message: 'Session updated successfully',
+      data: updatedSession
+    });
+  } catch (error) {
+    console.error('Error updating session:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Failed to update session'
+    });
+  }
+});
+
+// DELETE /api/sessions/:sessionId
+router.delete('/sessions/:sessionId', async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+    const { userId, role } = req.user || {};
+
+    // Check if user has access to this session
+    const session = await getSessionById(sessionId);
+    if (!session) {
+      return res.status(404).json({
+        success: false,
+        message: 'Session not found'
+      });
+    }
+
+    if (role !== 'ADMIN' && session.userId !== userId) {
+      return res.status(403).json({
+        success: false,
+        message: 'Access denied'
+      });
+    }
+
+    await deleteSession(sessionId);
+
+    res.json({
+      success: true,
+      message: 'Session deleted successfully'
+    });
+  } catch (error) {
+    console.error('Error deleting session:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Failed to delete session'
+    });
+  }
+});
+
+// GET /api/sessions/stats
+router.get('/sessions/stats', async (req, res) => {
+  try {
+    const { userId, role } = req.user || {};
+
+    let stats;
+    if (role === 'ADMIN') {
+      // Admin: get all session stats
+      stats = await getSessionStats();
+    } else {
+      // User: get their session stats
+      stats = await getSessionStats(userId);
+    }
+
+    res.json({
+      success: true,
+      data: stats
+    });
+  } catch (error) {
+    console.error('Error fetching session stats:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Failed to fetch session statistics'
+    });
   }
 });
 
