@@ -15,7 +15,7 @@ import redis from '../lib/redis.js';
  */
 export async function createSession(sessionData) {
   try {
-    const { sessionId, userId, apiUrl, auth, method, fileSize, fileType } = sessionData;
+    const { sessionId, userId, apiUrl, auth, method, fileSize, fileType, totalTxn } = sessionData;
     
     // Create session in database
     const dbSession = await Session.create({
@@ -24,7 +24,7 @@ export async function createSession(sessionData) {
       apiUrl,
       fileSize: fileSize || 0,
       fileType: fileType || null,
-      totalTxn: 0,
+      totalTxn: totalTxn || 0,
       status: 'ACTIVE'
     });
     

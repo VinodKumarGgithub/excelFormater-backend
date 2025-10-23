@@ -116,6 +116,7 @@ async function processRecord(record, apiUrl, auth, sessionId, jobId, recordIndex
   };
 
     const startTime = Date.now();
+    let timeMs = 0;
     
     try {
       // let response;
@@ -151,6 +152,7 @@ async function processRecord(record, apiUrl, auth, sessionId, jobId, recordIndex
         default:
           throw new Error(`Unsupported HTTP method: ${requestData.method}`);
       }
+      timeMs = Date.now() - startTime;
       
       multi.sadd(redisKeys.apiSuccess(sessionId), reqId);
       // Use Lists for time-series data
@@ -160,7 +162,7 @@ async function processRecord(record, apiUrl, auth, sessionId, jobId, recordIndex
       multi.lpush(`${chartKeyPrefix}:status:${roundedTime}:${statusCode}`, reqId);
       multi.sadd(`${redisKeys.apiStats(sessionId)}:status:${statusCode}`, reqId);
     } catch (err) {
-      
+      timeMs = Date.now() - startTime;
       // Prepare error response data
       const errorData = {
         status: err.response?.status,
@@ -172,7 +174,7 @@ async function processRecord(record, apiUrl, auth, sessionId, jobId, recordIndex
           stack: process.env.NODE_ENV === 'production' ? null : err.stack
         },
         success: false,
-        timeMs: Date.now() - startTime,
+        timeMs,
         // attempt
       };
       multi.sadd(redisKeys.apiFailure(sessionId), reqId);
@@ -185,6 +187,10 @@ async function processRecord(record, apiUrl, auth, sessionId, jobId, recordIndex
       // Track this failed API call
       await trackApiCall(sessionId, requestData, errorData);
     }
+
+    // add request time tracking with request with timeMs in hash for avrage calculation in hash
+    multi.hincrby(`${chartKeyPrefix}:avglatency`, reqId, timeMs);
+
 
     // Track latency data (keep this as it's for averages, not counts)
     multi.hincrby(`${chartKeyPrefix}:latency:${roundedTime}`, 'count', 1);

@@ -40,11 +40,23 @@ export async function getSessionStats(sessionId) {
           statusCodes[code] = count;
         });
       }
+      // average latency calculation
+      const latencyData = await redis.hgetall(`${redisKeys.apiChart(sessionId)}:avglatency`);
+      let avglatency = 0;
+      let latencyCount = 0;
+
+      for (const reqId in latencyData) {
+        avglatency += parseInt(latencyData[reqId] || 0);
+        latencyCount++;
+      }
+      
+      const averageLatencyMs = latencyCount > 0 ? Math.round(avglatency / latencyCount) : 0;
       
       return {
         total: total || 0,
         success: success || 0,
         failure: failure || 0,
+        averageLatencyMs,
         statusCodes
       };
     } catch (err) {

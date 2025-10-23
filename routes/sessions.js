@@ -58,7 +58,7 @@ router.use(authenticateJWT);
 // POST /api/init-session
 router.post('/init-session', async (req, res) => {
   try {
-    const { apiUrl, auth, method, fileSize, fileType } = req.body;
+    const { apiUrl, auth, method, fileSize, fileType, totalTxn } = req.body;
     
     if (!apiUrl || !auth || !method) {
       return res.status(400).json({ 
@@ -78,7 +78,8 @@ router.post('/init-session', async (req, res) => {
       auth,
       method,
       fileSize: fileSize || 0,
-      fileType: fileType || null
+      fileType: fileType || null,
+      totalTxn: totalTxn || 0,
     });
     
     res.json({ 
