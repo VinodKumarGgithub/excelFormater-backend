@@ -2,6 +2,7 @@ import sequelize from '../config/database.js';
 import User from './User.js';
 import Session from './Session.js';
 import AllowedIP from './AllowedIP.js';
+import DownloadJob from './DownloadJob.js';
 
 // Define associations
 User.hasMany(Session, {
@@ -33,6 +34,21 @@ AllowedIP.belongsTo(User, {
   onUpdate: 'CASCADE'
 });
 
+// DownloadJob associations
+Session.hasMany(DownloadJob, {
+  foreignKey: 'sessionId',
+  as: 'downloadJobs',
+  onDelete: 'CASCADE',
+  onUpdate: 'CASCADE'
+});
+
+DownloadJob.belongsTo(Session, {
+  foreignKey: 'sessionId',
+  as: 'session',
+  onDelete: 'CASCADE',
+  onUpdate: 'CASCADE'
+});
+
 // Initialize database connection and sync models
 export const initializeDatabase = async () => {
   try {
@@ -50,5 +66,5 @@ export const initializeDatabase = async () => {
   }
 };
 
-export { User, Session, AllowedIP, sequelize };
-export default { User, Session, AllowedIP, sequelize };
+export { User, Session, AllowedIP, DownloadJob, sequelize };
+export default { User, Session, AllowedIP, DownloadJob, sequelize };

@@ -20,12 +20,13 @@ import { initializeDatabase } from './models/index.js';
 
 const app = express();
 const batchQueue = new Queue('batchQueue', { connection: redis });
+const downloadQueue = new Queue('downloadQueue', { connection: redis})
 
 // Bull Board setup
 const serverAdapter = new ExpressAdapter();
 serverAdapter.setBasePath('/admin/queues');
 createBullBoard({
-  queues: [new BullMQAdapter(batchQueue)],
+  queues: [new BullMQAdapter(batchQueue), new BullMQAdapter(downloadQueue)],
   serverAdapter,
 });
 
