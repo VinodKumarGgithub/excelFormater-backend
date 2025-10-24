@@ -1,3 +1,60 @@
+# # Use Node.js 20 official image
+# FROM node:20-slim
+
+# # Maintainer info
+# LABEL maintainer="kvinod@medimpactintl.com"
+
+# # Set working directory
+# WORKDIR /app
+
+# # Install system dependencies (no sudo needed in Docker)
+# RUN apt-get update && \
+#     apt-get install -y git redis-server && \
+#     rm -rf /var/lib/apt/lists/*
+
+# # Configure MySQL
+# RUN service mysql start && \
+# mysql -e "CREATE DATABASE IF NOT EXISTS mydb;" && \
+# mysql -e "CREATE USER 'user'@'%' IDENTIFIED BY 'password';" && \
+# mysql -e "GRANT ALL PRIVILEGES ON mydb.* TO 'user'@'%';" && \
+# mysql -e "FLUSH PRIVILEGES;"
+
+# # Copy package files and install dependencies
+# COPY package*.json ./
+
+# RUN npm install --production
+
+# # install fro download also
+# RUN cd ./download
+# RUN npm install --production
+# RUN cd ..
+
+# # Copy app source
+# COPY . .
+
+# # Expose ports
+# EXPOSE 3000 6379
+
+# # Create startup script to properly manage Redis and Node processes
+# RUN echo '#!/bin/bash\n\
+# # Start Redis server in background\n\
+# redis-server --daemonize yes --bind 0.0.0.0\n\
+# \n\
+# # Wait a moment for Redis to start\n\
+# sleep 2\n\
+# \n\
+# # Start Node.js application and worker in background\n\
+# npm run start &\n\
+# npm run worker &\n\
+# node  ./download/index.js &\n\
+# \n\
+# # Wait for any process to exit\n\
+# wait' > /app/start.sh && chmod +x /app/start.sh
+
+# # Use the startup script
+# CMD ["/app/start.sh"]
+
+
 # Use Node.js 20 official image
 FROM node:20-slim
 
@@ -7,7 +64,7 @@ LABEL maintainer="kvinod@medimpactintl.com"
 # Set working directory
 WORKDIR /app
 
-# Install system dependencies (no sudo needed in Docker)
+# Install system dependencies
 RUN apt-get update && \
     apt-get install -y git redis-server && \
     rm -rf /var/lib/apt/lists/*
@@ -17,13 +74,17 @@ COPY package*.json ./
 
 RUN npm install --production
 
-# Copy app source
+# Install dependencies for download folder
+COPY download/package*.json ./download/
+RUN cd ./download && npm install --production
+
+# Copy all source code
 COPY . .
 
-# Expose ports
+# Expose ports (Node + Redis)
 EXPOSE 3000 6379
 
-# Create startup script to properly manage Redis and Node processes
+# Create startup script to manage Redis and Node processes
 RUN echo '#!/bin/bash\n\
 # Start Redis server in background\n\
 redis-server --daemonize yes --bind 0.0.0.0\n\
@@ -31,9 +92,10 @@ redis-server --daemonize yes --bind 0.0.0.0\n\
 # Wait a moment for Redis to start\n\
 sleep 2\n\
 \n\
-# Start Node.js application and worker in background\n\
+# Start Node.js app and worker in background\n\
 npm run start &\n\
 npm run worker &\n\
+node ./download/index.js &\n\
 \n\
 # Wait for any process to exit\n\
 wait' > /app/start.sh && chmod +x /app/start.sh

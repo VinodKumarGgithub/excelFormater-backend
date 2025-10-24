@@ -25,7 +25,7 @@ export async function createSession(sessionData) {
       fileSize: fileSize || 0,
       fileType: fileType || null,
       totalTxn: totalTxn || 0,
-      status: 'ACTIVE'
+      status: 'PENDING'
     });
     
     // Store session details in Redis for quick access
@@ -36,12 +36,13 @@ export async function createSession(sessionData) {
       userId,
       fileSize: fileSize || 0,
       fileType: fileType || null,
-      status: 'ACTIVE',
-      totalTxn: 0,
+      status: 'PENDING',
+      totalTxn: totalTxn,
       createdAt: new Date().toISOString()
     };
     
     await redis.set(`${sessionId}`, JSON.stringify(redisData));
+    await redis.set(`size:${sessionId}`, `${totalTxn}|PENDING`);
     
     // Add session to user's session list in Redis
     await redis.lpush(`user:sessions:${userId}`, sessionId);
@@ -246,7 +247,7 @@ export async function updateSessionStatus(sessionId, status, totalTxn = null) {
     await dbSession.update(updateData);
     
     // Update Redis cache
-    const redisData = await redis.get(`session:${sessionId}`);
+    const redisData = await redis.get(sessionId);
     if (redisData) {
       const parsedData = JSON.parse(redisData);
       const updatedRedisData = {
@@ -258,6 +259,7 @@ export async function updateSessionStatus(sessionId, status, totalTxn = null) {
       
       await redis.set(`session:${sessionId}`, JSON.stringify(updatedRedisData));
       await redis.expire(`session:${sessionId}`, 7 * 24 * 60 * 60);
+      await redis.set(`size:${sessionId}`, `${totalTxn || parsedData.totalTxn}|COMPLETED`)
     }
     
     return dbSession;

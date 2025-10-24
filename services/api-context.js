@@ -1,6 +1,7 @@
 import redis from "../lib/redis.js";
 import { redisKeys } from "../lib/redis/redisKeys.js";
 import axios from "axios";
+import { updateSessionStatus } from "./sessionService.js";
 
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 
@@ -16,11 +17,16 @@ export async function getSessionStats(sessionId) {
       sessionId = redisKeys.sessionConfig(sessionId);
       
       // Get set counts for total, success, and failure
-      const [total, success, failure] = await Promise.all([
+      const [total, success, failure, fileSize] = await Promise.all([
         redis.scard(redisKeys.apiTotal(sessionId)),
         redis.scard(redisKeys.apiSuccess(sessionId)),
-        redis.scard(redisKeys.apiFailure(sessionId))
+        redis.scard(redisKeys.apiFailure(sessionId)),
+        redis.get(`size:${sessionId}`)
       ]);
+
+      if(fileSize && fileSize?.split('|')[1] != 'COMPLETED' && total == fileSize?.split('|')[0]){
+        await updateSessionStatus(sessionId, 'COMPLETED' )
+      }
       
       // Get status code distribution using sets
       const statusCodeKeys = await redis.keys(`${redisKeys.apiStats(sessionId)}:status:*`);

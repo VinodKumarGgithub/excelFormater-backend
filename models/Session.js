@@ -44,11 +44,11 @@ const Session = sequelize.define('Session', {
     comment: 'Total number of transactions processed'
   },
   status: {
-    type: DataTypes.ENUM('ACTIVE', 'COMPLETED', 'FAILED', 'CANCELLED'),
+    type: DataTypes.ENUM('PENDING', 'IN_PROGRESS', 'COMPLETED', 'FAILED', 'CANCELLED'),
     allowNull: false,
-    defaultValue: 'ACTIVE',
+    defaultValue: 'PENDING',
     validate: {
-      isIn: [['ACTIVE', 'COMPLETED', 'FAILED', 'CANCELLED']]
+      isIn: [['PENDING', 'IN_PROGRESS', 'COMPLETED', 'FAILED', 'CANCELLED']]
     }
   },
   completedAt: {

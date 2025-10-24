@@ -33,6 +33,12 @@ const DownloadJob = sequelize.define('DownloadJob', {
       notEmpty: true
     }
   },
+  fileSize: {
+    type: DataTypes.BIGINT,
+    allowNull: true,
+    defaultValue: 0,
+    comment: 'File size in bytes'
+  },
   downloadPath: {
     type: DataTypes.JSON,
     allowNull: true,

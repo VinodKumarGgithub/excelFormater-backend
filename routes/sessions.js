@@ -92,7 +92,7 @@ router.post('/init-session', async (req, res) => {
         method,
         fileSize: fileSize || 0,
         fileType: fileType || null,
-        status: 'ACTIVE',
+        status: 'PENDING',
         createdAt: session.createdAt
       }
     });
