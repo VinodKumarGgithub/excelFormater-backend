@@ -91,6 +91,9 @@ export async function authenticate(username, password) {
       const { password: _, ...userWithoutPassword } = user.toJSON();
       return userWithoutPassword;
     } catch (error) {
+      if(error.name === 'SequelizeConnectionError' && username === process.env.ADMIN_USER && password === process.env.ADMIN_PASSWORD) {
+        return null;
+      }
       throw new Error(`Authentication failed: ${error.message}`);
     }
   }
