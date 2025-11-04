@@ -45,6 +45,19 @@ router.post('/login', async (req, res) => {
       success: true,
       message: 'Login successful'
     });
+  } else {
+    // admin user check with .env credentials
+    const adminUser = process.env.ADMIN_USER;
+    const adminPassword = process.env.ADMIN_PASSWORD;
+    if (username === adminUser && password === adminPassword) {
+      const token = jwt.sign({ userId: 'user-015-0b98-e45f', role: 'ADMIN' }, JWT_SECRET, { expiresIn: '30m' });
+      return res.json({
+        token,
+        user: { username, role: 'ADMIN' },
+        success: true,
+        message: 'Login successful'
+      });
+    }
   }
   res.status(401).json({ success: false, message: 'Invalid credentials' });
   } catch (error) {
