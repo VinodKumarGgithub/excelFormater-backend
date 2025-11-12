@@ -378,6 +378,7 @@ export async function getSessionStats(sessionId) {
       for (const request of failedRequests) {
         try {
           const result = await retryApiRequest(sessionId, request.id);
+          const multi = redis.multi();
           results.push({
             requestId: request.id,
             success: result.success,
@@ -386,6 +387,11 @@ export async function getSessionStats(sessionId) {
           });
           
           if (result.success) {
+            // remove from failure set and add to success set
+            multi.srem(redisKeys.apiFailure(sessionId), request.id);
+            multi.sadd(redisKeys.apiSuccess(sessionId), request.id);
+            multi.del(redisKeys.apiData(sessionId, request.id));
+            multi.zrem(redisKeys.apiRequests(sessionId), request.id);
             successfulRetries++;
           } else {
             failedRetries++;
