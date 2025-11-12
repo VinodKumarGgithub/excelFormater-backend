@@ -40,9 +40,12 @@ const AllowedIP = sequelize.define('AllowedIP', {
     }
   },
   isActive: {
-    type: DataTypes.BOOLEAN,
-    defaultValue: true,
-    allowNull: false
+    type: DataTypes.INTEGER,
+    defaultValue: 1,
+    allowNull: false,
+    validate: {
+      isIn: [[0, 1]]
+    }
   },
   expiresAt: {
     type: DataTypes.DATE,

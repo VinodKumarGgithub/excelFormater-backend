@@ -1,8 +1,9 @@
 import redis from '../lib/redis.js';
+import AllowedIP from '../models/AllowedIP.js';
 
 export const checkIP = async (req, res, next) => {
   // const ip = req.ip || req.connection.remoteAddress;
-  if(process.env.NODE_ENV === 'development') {
+  if(process.env.NODE_ENV === 'development' || req.method === 'OPTIONS') {
     return next();
   }
   // if admin/queues, skip ip check
@@ -14,10 +15,16 @@ export const checkIP = async (req, res, next) => {
     const ip = req.headers['x-client-ip'] || req.ip;
     // Read allowed IPs from Redis Set
     const allowedIPsSet = await redis.smembers('allowedIps:ipv4');
+    const allowedIPsDB = await AllowedIP.findAll({
+      where: {
+        isActive: true
+      },
+      attributes: ['ip']
+    });
 
     // Include hardcoded/env IPs for backward compatibility or initial seeding if the set is empty
     const defaultAllowedIPs = process.env.ALLOWED_IPS?.split(',') || ['127.0.0.1', '::1', '45.74.39.250'];
-    const allAllowedIPs = new Set([...allowedIPsSet, ...defaultAllowedIPs]);
+    const allAllowedIPs = new Set([...allowedIPsSet, ...defaultAllowedIPs, ...allowedIPsDB.map(ip => ip.ip)]);
 
     if (allAllowedIPs.has(ip)) {
       return next();
