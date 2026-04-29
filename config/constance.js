@@ -2,6 +2,8 @@
 export default {
     publicPath: [
         '/admin/queues',
-        '/system-health'
+        '/system-health',
+        '/queue-super-batch',
+        '/queue-batch',
     ],
 }

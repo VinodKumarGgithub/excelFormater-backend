@@ -21,6 +21,25 @@ router.post('/queue-batch', async (req, res) => {
   res.json({ success: true, message: 'Batch queued successfully' });
 });
 
+// POST /api/queue-super-batch
+router.post('/queue-super-batch', async (req, res) => {
+  const { sessionId, superBatches } = req.body;
+  if (!sessionId || !superBatches || !Array.isArray(superBatches)) {
+    return res.status(400).json({ success: false, message: 'Missing or invalid data' });
+  }
+
+  // Use BullMQ addBulk for optimized multi-job queueing
+  const jobs = superBatches.map(batch => ({
+    name: `processBatch-${sessionId}`,
+    data: { sessionId, records: batch },
+    opts: { removeOnComplete: true, removeOnFail: false }
+  }));
+
+  await batchQueue.addBulk(jobs);
+  res.json({ success: true, message: `${superBatches.length} batches queued successfully` });
+});
+
+
 // post download job
 router.post('/post-job', async (req, res) => {
   const { sessionId, prefix, dbURI } = req.body;
