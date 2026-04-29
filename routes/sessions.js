@@ -1,6 +1,7 @@
 import express from 'express';
 import jwt from 'jsonwebtoken';
 import { authenticate } from '../services/userService.js';
+import { isIPAllowed } from '../middleware/ip.js';
 import { 
   createSession, 
   getSessionById, 
@@ -31,35 +32,43 @@ export function authenticateJWT(req, res, next) {
   }
 }
 
-// POST /api/login
+// POST /api/login — IP checked for non-admin users
 router.post('/login', async (req, res) => {
   const { username, password } = req.body;
-  try{
+  try {
+    const clientIP = req.headers['x-client-ip'] || req.ip;
 
-  const user = await authenticate(username, password);
-  if (user) {
-    const token = jwt.sign({ userId: user.userId, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
-    return res.json({
-      token,
-      user: { username, role: user.role },
-      success: true,
-      message: 'Login successful'
-    });
-  } else {
-    // admin user check with .env credentials
-    const adminUser = process.env.ADMIN_USER;
-    const adminPassword = process.env.ADMIN_PASSWORD;
-    if (username === adminUser && password === adminPassword) {
-      const token = jwt.sign({ userId: 'user-015-0b98-e45f', role: 'ADMIN' }, JWT_SECRET, { expiresIn: '30m' });
+    const user = await authenticate(username, password);
+    if (user) {
+      // Skip IP check for ADMIN role
+      if (user.role?.toUpperCase() !== 'ADMIN') {
+        const allowed = await isIPAllowed(clientIP);
+        if (!allowed) {
+          return res.status(403).json({ success: false, message: `Access denied: IP address ${clientIP} is not allowed.` });
+        }
+      }
+      const token = jwt.sign({ userId: user.userId, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
       return res.json({
         token,
-        user: { username, role: 'ADMIN' },
+        user: { username, role: user.role },
         success: true,
         message: 'Login successful'
       });
+    } else {
+      // admin user check with .env credentials — no IP check needed
+      const adminUser = process.env.ADMIN_USER;
+      const adminPassword = process.env.ADMIN_PASSWORD;
+      if (username === adminUser && password === adminPassword) {
+        const token = jwt.sign({ userId: 'user-015-0b98-e45f', role: 'ADMIN' }, JWT_SECRET, { expiresIn: '30m' });
+        return res.json({
+          token,
+          user: { username, role: 'ADMIN' },
+          success: true,
+          message: 'Login successful'
+        });
+      }
     }
-  }
-  res.status(401).json({ success: false, message: 'Invalid credentials' });
+    res.status(401).json({ success: false, message: 'Invalid credentials' });
   } catch (error) {
     res.status(401).json({ success: false, message: error.message });
   }

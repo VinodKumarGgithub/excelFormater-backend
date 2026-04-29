@@ -34,13 +34,18 @@ createBullBoard({
 app.use(requestLogger); // Add request/response logging
 app.use(cors());
 app.use(express.json());
+
+app.use('/api', sessionsRouter);
+
+// apply ip check for all other routes
 app.use(checkIP);
+
 app.use('/admin/queues', basicAuth({
   users: { 'admin': 'password123' },
   challenge: true,
 }))
 app.use('/admin/queues', serverAdapter.getRouter());
-app.use('/api', sessionsRouter);
+
 app.use('/api', jobsRouter);
 app.use('/api', apiContextRouter);
 app.use('/api', systemHealthRouter);
