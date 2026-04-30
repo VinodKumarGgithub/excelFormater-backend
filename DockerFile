@@ -36,5 +36,5 @@ EXPOSE 3000
 # # Wait for any process to exit\n\
 # wait' > /app/start.sh && chmod +x /app/start.sh
 
-# Use the startup script
-CMD npm run start && npm run worker
+# Run both processes concurrently using bash
+CMD ["/bin/bash", "-c", "npm run start & npm run worker & wait -n"]

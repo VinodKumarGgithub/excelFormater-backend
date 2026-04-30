@@ -35,16 +35,16 @@ app.use(requestLogger); // Add request/response logging
 app.use(cors());
 app.use(express.json({ limit: '100mb' }));
 app.use(express.urlencoded({ limit: '100mb', extended: true }));
+app.use('/admin/queues', basicAuth({
+  users: { 'admin': 'password123' },
+  challenge: true,
+}))
 
 app.use('/api', sessionsRouter);
 
 // apply ip check for all other routes
 app.use(checkIP);
 
-app.use('/admin/queues', basicAuth({
-  users: { 'admin': 'password123' },
-  challenge: true,
-}))
 app.use('/admin/queues', serverAdapter.getRouter());
 
 app.use('/api', jobsRouter);

@@ -1,6 +1,5 @@
 import { Worker, Job } from 'bullmq';
-import dotenv from 'dotenv';
-dotenv.config();
+import 'dotenv/config.js';
 import axios from 'axios';
 import redis from './lib/redis.js';
 import { redisKeys } from './lib/redis/redisKeys.js';
@@ -186,17 +185,18 @@ async function processRecord(record, apiUrl, auth, sessionId, jobId, recordIndex
       multi.sadd(`${redisKeys.apiStats(sessionId)}:status:${statusCode}`, reqId);
       // Track this failed API call
       await trackApiCall(sessionId, requestData, errorData);
+      
+      // Throw the error so the outer loop increments failureCount
+      throw err;
+    } finally {
+      // add request time tracking with request with timeMs in hash for avrage calculation in hash
+      multi.hincrby(`${chartKeyPrefix}:avglatency`, reqId, timeMs);
+
+      // Track latency data (keep this as it's for averages, not counts)
+      multi.hincrby(`${chartKeyPrefix}:latency:${roundedTime}`, 'count', 1);
+      multi.hincrbyfloat(`${chartKeyPrefix}:latency:${roundedTime}`, 'totalTimeMs', Date.now() - startTime || 0);
+      await multi.exec();
     }
-
-    // add request time tracking with request with timeMs in hash for avrage calculation in hash
-    multi.hincrby(`${chartKeyPrefix}:avglatency`, reqId, timeMs);
-
-
-    // Track latency data (keep this as it's for averages, not counts)
-    multi.hincrby(`${chartKeyPrefix}:latency:${roundedTime}`, 'count', 1);
-    multi.hincrbyfloat(`${chartKeyPrefix}:latency:${roundedTime}`, 'totalTimeMs', Date.now() - startTime || 0);
-    await multi.exec();
-
 }
 
 // Enhanced worker with better error handling and monitoring
@@ -249,6 +249,7 @@ const newWorker = new Worker(
     };
   },
   {
+    connection: redis,
     concurrency: parseInt(process.env.WORKER_CONCURRENCY) || 1, // Strictly limit to 10 concurrent jobs
     settings: {
       retryProcessDelay: 5000,

@@ -193,8 +193,8 @@ router.get('/requests/:sessionId/:requestId', async (req, res) => {
     
     data.statusText = statusTexts[data.responseStatus] || 'Unknown';
     
-    // Add flag to indicate if this request can be retried (4xx errors)
-    data.canRetry = !data.success && data.responseStatus >= 400 && data.responseStatus < 500;
+    // Add flag to indicate if this request can be retried (4xx and 5xx errors)
+    data.canRetry = !data.success && data.responseStatus >= 400;
     
     res.json({
       id: requestId,

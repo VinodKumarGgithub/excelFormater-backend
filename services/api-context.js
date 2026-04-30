@@ -8,7 +8,7 @@ process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 // Configure axios instance with defaults
 const api = axios.create({
   timeout: 30000,
-  validateStatus: status => status < 300 // Retry only on 500+ errors
+  validateStatus: status => status < 300
 });
 
 // Get session statistics using sets
@@ -118,8 +118,8 @@ export async function getSessionStats(sessionId) {
           // Add the request ID
           data.id = reqId;
           
-          // Add flag to indicate if this request can be retried (4xx errors)
-          data.canRetry = !data.success && data.responseStatus >= 400 && data.responseStatus < 500;
+          // Add flag to indicate if this request can be retried (4xx and 5xx errors)
+          data.canRetry = !data.success && data.responseStatus >= 400;
           
           requests.push(data);
         }
