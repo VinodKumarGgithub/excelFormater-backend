@@ -1,5 +1,4 @@
 import express from 'express';
-import { Queue } from 'bullmq';
 import { createBullBoard } from '@bull-board/api';
 import { BullMQAdapter } from '@bull-board/api/bullMQAdapter.js';
 import { ExpressAdapter } from '@bull-board/express';
@@ -10,8 +9,14 @@ import { ENV } from './lib/config/appConfig.js';
 import redis from './lib/config/redisConfig.js';
 import { logger } from './lib/services/loggerService.js';
 
-// Import services
+// Import services & db
 import workerPool from './lib/services/workerPool.js';
+import { getBatchQueue } from './lib/services/queueService.js';
+import sequelize from './lib/config/db.js';
+import bcrypt from 'bcryptjs';
+import User from './lib/models/User.js';
+import Session from './lib/models/Session.js';
+import ApiLog from './lib/models/ApiLog.js';
 
 // Import routes
 import jobsRouter from './routes/jobs.js';
@@ -22,7 +27,7 @@ import errorsRouter from './routes/errors.js';
 
 const app = express();
 const port = ENV.PORT;
-const batchQueue = new Queue('batchQueue', { connection: redis });
+const batchQueue = getBatchQueue();
 
 // Bull Board setup
 const serverAdapter = new ExpressAdapter();
@@ -70,16 +75,50 @@ process.on('SIGTERM', async () => {
   try {
     // Shut down worker pool
     await workerPool.shutdown();
-    logger.info('Worker pool shutdown complete');
+    await sequelize.close();
+    logger.info('Worker pool and DB shutdown complete');
   } catch (err) {
-    logger.error({ error: err.message }, 'Error shutting down worker pool');
+    logger.error({ error: err.message }, 'Error shutting down');
   }
   
   process.exit(0);
 });
 
-// Start server
-app.listen(port, () => {
-  logger.info(`Server running at http://localhost:${port}`);
-  logger.info(`Bull Board available at http://localhost:${port}/admin/queues`);
-});
+// Database initialization
+async function initDatabase() {
+  try {
+    await sequelize.authenticate();
+    logger.info('Database connection has been established successfully.');
+    
+    // Sync models
+    await sequelize.sync({ alter: true });
+    logger.info('Database models synchronized.');
+
+    // Seed admin
+    const adminCount = await User.count({ where: { role: 'ADMIN' } });
+    if (adminCount === 0) {
+      const hashedPassword = await bcrypt.hash('password123', 10);
+      await User.create({
+        username: 'admin',
+        password: hashedPassword,
+        role: 'ADMIN',
+        status: 'ACTIVE'
+      });
+      logger.info('Default ADMIN user (admin / password123) successfully seeded.');
+    }
+  } catch (err) {
+    logger.error({ error: err.message }, 'Unable to initialize database');
+  }
+}
+
+// Start sequence
+try {
+  await initDatabase();
+  app.listen(port, () => {
+    logger.info(`Server running at http://localhost:${port}`);
+    logger.info(`Bull Board available at http://localhost:${port}/admin/queues`);
+  });
+} catch (error) {
+  logger.error({ error: error.message }, 'Server failed to start');
+  process.exit(1);
+}

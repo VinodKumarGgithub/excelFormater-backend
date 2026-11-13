@@ -3,9 +3,10 @@
  */
 import express from 'express';
 import { authenticateJWT } from './sessions.js';
-import { getUserActionErrors, resolveUserActionError } from '../lib/services/processRecord.js';
 import { logger } from '../lib/services/loggerService.js';
 import workerPool from '../lib/services/workerPool.js';
+import { getUserActionErrors, resolveUserActionError } from '../lib/services/recordStore.js';
+import ApiLog from '../lib/models/ApiLog.js';
 
 const router = express.Router();
 
@@ -20,7 +21,7 @@ router.get('/errors/user-action/:sessionId', async (req, res) => {
   try {
     const { sessionId } = req.params;
     
-    // Get user action errors from Redis
+    // Get user action errors from DB
     const errors = await getUserActionErrors(sessionId);
     
     logger.info({
@@ -134,11 +135,10 @@ router.post('/errors/user-action/:errorId/reprocess', async (req, res) => {
       });
     }
     
-    // Make sure the error exists
-    const errorData = await getUserActionErrors(errorId.split(':')[0]);
-    const error = errorData.find(e => e.errorId === errorId);
+    // Look up the error directly by its DB primary key
+    const errorLog = await ApiLog.findByPk(errorId);
     
-    if (!error) {
+    if (!errorLog || errorLog.status !== 0) {
       return res.status(404).json({
         error: 'Error not found'
       });

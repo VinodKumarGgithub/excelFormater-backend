@@ -10,26 +10,7 @@ const router = express.Router();
 
 router.use(authenticateJWT);
 
-// GET /api/metrics/:jobId
-router.get('/metrics/:jobId', async (req, res) => {
-  try {
-    const { jobId } = req.params;
-    const metrics = await redis.hgetall(`metrics:${jobId}`);
-    
-    if (!metrics || Object.keys(metrics).length === 0) {
-      logger.warn({ jobId }, 'No metrics found for job');
-      return res.json({ error: 'No metrics found for this job' });
-    }
-    
-    logger.debug({ jobId }, 'Retrieved job metrics');
-    res.json(metrics);
-  } catch (err) {
-    logger.error({ error: err.message, jobId: req.params.jobId }, 'Failed to retrieve job metrics');
-    res.status(500).json({ error: err.message });
-  }
-});
 
-// GET /api/worker-metrics
 router.get('/worker-metrics', async (req, res) => {
   try {
     // Get all worker metrics keys
@@ -77,38 +58,7 @@ router.get('/worker-metrics', async (req, res) => {
   }
 });
 
-/**
- * Get worker metrics
- */
-router.get('/metrics/workers', async (req, res) => {
-  try {
-    // Get all worker metric keys
-    const workerKeys = await redis.keys('worker:globalMetrics:*');
-    
-    // Get metrics for all workers
-    const workerMetrics = await Promise.all(
-      workerKeys.map(async (key) => {
-        const data = await redis.get(key);
-        if (!data) return null;
-        
-        try {
-          return JSON.parse(data);
-        } catch (e) {
-          return null;
-        }
-      })
-    );
-    
-    // Filter out nulls and return
-    const metrics = workerMetrics.filter(Boolean);
-    res.json({ metrics });
-  } catch (error) {
-    logger.error({ error: error.message }, 'Failed to get worker metrics');
-    res.status(500).json({ error: 'Failed to get worker metrics' });
-  }
-});
-
-/**
+/*
  * Get API performance metrics
  */
 router.get('/metrics/api', async (req, res) => {

@@ -1,12 +1,13 @@
 import express from 'express';
-import { Queue } from 'bullmq';
+
 
 // Import from new module structure
 import redis from '../lib/config/redisConfig.js';
 import { logger } from '../lib/services/loggerService.js';
 import { authenticateJWT } from './sessions.js';
 
-const batchQueue = new Queue('batchQueue', { connection: redis });
+import { getBatchQueue } from '../lib/services/queueService.js';
+const batchQueue = getBatchQueue();
 const router = express.Router();
 
 router.use(authenticateJWT);
